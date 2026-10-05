@@ -39,6 +39,9 @@ debuggable directory build. PyInstaller builds are host-native, so a Windows
 EXE must be built on Windows (Linux users can run the same Tk entry point from
 source with `python3 portable/agentreins_desktop.py`).
 
+Every push to `main` also builds `AgentReins.exe` in GitHub Actions and makes
+it available as the `AgentReins-Windows-x64` workflow artifact.
+
 ### Platform collectors
 
 | Platform | Process source | Network source | Fallback |
