@@ -29,13 +29,6 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress --yes
-      - name: Install .NET 8 SDK for optional ETW helper
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-      - name: Build optional ETW helper
-        shell: pwsh
-        run: .\windows\AgentReinsEtw\build.ps1
       - name: Prepare optional Authenticode signing
         id: windows-signing
         shell: pwsh
@@ -62,6 +55,16 @@ jobs:
           [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:SIGN_CERT_P12))
           "AGENTREINS_WINDOWS_SIGN_CERT=$certificate" >> $env:GITHUB_ENV
           'has_signing=true' >> $env:GITHUB_OUTPUT
+      - name: Install .NET 8 SDK for optional ETW helper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build optional ETW helper
+        shell: pwsh
+        env:
+          AGENTREINS_WINDOWS_SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          AGENTREINS_WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: .\windows\AgentReinsEtw\build.ps1
       - name: Build installer
         shell: pwsh
         env:
