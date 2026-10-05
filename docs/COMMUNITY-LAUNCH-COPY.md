@@ -54,7 +54,7 @@ Read each community's rules immediately before posting. Do not publish identical
 >
 > I made the repository public because I do not want to hide those limitations behind launch copy:
 >
-> https://github.com/yardfribley-bit/AgentReins
+> https://github.com/lao578/AgentReins-Desktop
 >
 > I would love blunt feedback on two questions:
 >
@@ -93,11 +93,11 @@ Check the current rules before posting. At the time this document was reviewed, 
 >
 > The project is currently free and public while it is under active development:
 >
-> https://github.com/yardfribley-bit/AgentReins
+> https://github.com/lao578/AgentReins-Desktop
 >
 > **Changelog and roadmap**
 >
-> https://github.com/yardfribley-bit/AgentReins/tree/main/docs
+> https://github.com/lao578/AgentReins-Desktop/tree/main/docs
 >
 > **AI development disclosure**
 >
@@ -123,7 +123,7 @@ Post only when a stranger can download or build the project and complete one cre
 >
 > The current integration focuses on WorkBuddy. The next engineering milestone is a trustworthy end-to-end loop: Git-quality attribution, independent build/test verification, and complete-turn recovery. I am also working on Provider Trust for identifying unverified model relays without pretending that behavioral fingerprinting can cryptographically prove model identity.
 >
-> Source and architecture: https://github.com/yardfribley-bit/AgentReins
+> Source and architecture: https://github.com/lao578/AgentReins-Desktop
 >
 > I would appreciate feedback on the trust model, event correlation, and safe recovery design.
 
@@ -148,7 +148,7 @@ Post only when a stranger can download or build the project and complete one cre
 > 3. Recover the complete turn without deleting work that already existed.
 > 4. Reveal which provider or relay actually received the user’s context.
 >
-> The repository is public, including the gaps and acceptance criteria: https://github.com/yardfribley-bit/AgentReins
+> The repository is public, including the gaps and acceptance criteria: https://github.com/lao578/AgentReins-Desktop
 >
 > I am preparing for a Product Hunt launch, but I do not want to optimize a weak product for launch-day traffic. If you use coding agents, which of these four outcomes would make you install a separate Mac app?
 
@@ -164,7 +164,7 @@ Post only when a stranger can download or build the project and complete one cre
 >
 > I’m building AgentReins for macOS: Trace. Verify. Recover. Provider Trust.
 >
-> https://github.com/yardfribley-bit/AgentReins
+> https://github.com/lao578/AgentReins-Desktop
 
 ### Short thread
 
@@ -176,7 +176,7 @@ Post only when a stranger can download or build the project and complete one cre
 >
 > **4/5** Provider Trust will flag unverified API relays and show what categories of sensitive data left the device—with honest confidence labels.
 >
-> **5/5** It is early, local-first, macOS-first, and public. Feedback and technical criticism are welcome: https://github.com/yardfribley-bit/AgentReins
+> **5/5** It is early, local-first, macOS-first, and public. Feedback and technical criticism are welcome: https://github.com/lao578/AgentReins-Desktop
 
 ---
 
@@ -195,7 +195,7 @@ Post only when a stranger can download or build the project and complete one cre
 >
 > The project is still under active development, and I have published both the source and the missing capabilities instead of presenting roadmap work as finished functionality.
 >
-> Repository: https://github.com/yardfribley-bit/AgentReins
+> Repository: https://github.com/lao578/AgentReins-Desktop
 >
 > If you use coding agents professionally or personally, I would value your perspective: what evidence do you need before trusting an agent’s work?
 

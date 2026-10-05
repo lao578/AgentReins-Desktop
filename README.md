@@ -8,7 +8,7 @@
   <p>A local-first safety and transparency companion for personal AI coding agents on macOS, Windows, and Linux.</p>
 
   <p>
-    <a href="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="https://github.com/lao578/AgentReins-Desktop/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lao578/AgentReins-Desktop/actions/workflows/ci.yml/badge.svg"></a>
     <img alt="Platform: macOS, Windows, Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-111111">
     <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
     <img alt="Status: Alpha" src="https://img.shields.io/badge/status-alpha-F59E0B">
@@ -186,7 +186,7 @@ installed with `BrowserExtension/install-native-host.ps1` on Windows or
 ### Development build
 
 ```bash
-git clone https://github.com/yardfribley-bit/AgentReins.git
+git clone https://github.com/lao578/AgentReins-Desktop.git
 cd AgentReins
 swift build
 swift run AgentReins
@@ -290,4 +290,4 @@ Please open a GitHub issue before starting a large change so the evidence model 
 
 AgentReins is under active development and is not yet a substitute for endpoint security, backups, code review, or Git. The immediate milestone is one trustworthy end-to-end workflow that can trace a supported agent turn, verify its result independently, and recover it without damaging pre-existing work.
 
-If this is a problem you have encountered, [open an issue](https://github.com/yardfribley-bit/AgentReins/issues) and describe the workflow you want AgentReins to make understandable.
+If this is a problem you have encountered, [open an issue](https://github.com/lao578/AgentReins-Desktop/issues) and describe the workflow you want AgentReins to make understandable.
