@@ -11,7 +11,7 @@ AgentReins CI builds a Universal 2 macOS application containing both `arm64` and
 | `APPLE_ID` | Apple ID used by the notarization service. |
 | `APPLE_TEAM_ID` | Apple Developer Team ID. |
 | `APPLE_APP_PASSWORD` | App-specific password used by `notarytool`. |
-| `WINDOWS_SIGNING_CERT_P12` | Base64-encoded Authenticode Code Signing PFX for Windows artifacts. |
+| `WINDOWS_SIGNING_CERT_P12` | Base64-encoded Authenticode Code Signing PFX for Windows artifacts (including the optional ETW helper). |
 | `WINDOWS_SIGNING_CERT_PASSWORD` | Password used to open the Authenticode PFX. |
 
 The Windows certificate secrets are optional. When both are configured, CI signs `AgentReins.exe`, the Native Messaging host, and the installer with SHA-256 and an RFC 3161 timestamp, then verifies each signature before calculating release checksums. Configure both or neither. If absent, CI explicitly reports that the release binaries are unsigned. Do not interpret a SHA-256 checksum as a publisher signature: checksums detect transfer corruption but do not authenticate the publisher.

@@ -59,6 +59,11 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Build desktop executable and Native Messaging host
+        shell: pwsh
+        env:
+          AGENTREINS_VERSION: ${{ steps.version.outputs.version }}
+        run: .\portable\build-windows.ps1 -Clean
       - name: Build optional ETW helper
         shell: pwsh
         env:
@@ -70,7 +75,7 @@ jobs:
         env:
           AGENTREINS_VERSION: ${{ steps.version.outputs.version }}
           AGENTREINS_WINDOWS_SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
-        run: .\installers\windows\build-installer.ps1
+        run: .\installers\windows\build-installer.ps1 -SkipExecutable
       - name: Report Windows signature status
         shell: pwsh
         env:
