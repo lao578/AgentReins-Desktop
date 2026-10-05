@@ -30,7 +30,7 @@ ChangesAssociations=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [CustomMessages]
 english.CreateDesktopIcon=Create a desktop shortcut
