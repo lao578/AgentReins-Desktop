@@ -1,0 +1,15 @@
+[Unit]
+Description=AgentReins evidence collector
+Documentation=https://github.com/lao578/AgentReins-Desktop
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/agentreins/agentreins-portable watch --interval 2
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

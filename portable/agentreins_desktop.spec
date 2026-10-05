@@ -2,6 +2,14 @@
 # Build on Windows with: powershell -ExecutionPolicy Bypass -File build-windows.ps1
 from pathlib import Path
 
+tray_imports = []
+try:
+    import pystray  # noqa: F401
+    import PIL  # noqa: F401
+    tray_imports = ["pystray", "pystray._win32", "PIL", "PIL.Image", "PIL.ImageDraw"]
+except ImportError:
+    pass
+
 ROOT = Path(SPECPATH).parent
 ENTRY = ROOT / "portable" / "agentreins_desktop.py"
 
@@ -10,7 +18,9 @@ a = Analysis(
     pathex=[str(ROOT / "portable"), str(ROOT)],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    # The desktop shell loads tray support lazily so source runs remain
+    # dependency-free. Include it in release binaries when installed.
+    hiddenimports=tray_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

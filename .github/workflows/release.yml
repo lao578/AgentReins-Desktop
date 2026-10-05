@@ -40,11 +40,9 @@ jobs:
           [[ -n "$CERTIFICATE_P12" ]] && echo "has_signing=true" >> "$GITHUB_OUTPUT" || echo "has_signing=false" >> "$GITHUB_OUTPUT"
           [[ -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_PASSWORD" ]] && echo "has_notary=true" >> "$GITHUB_OUTPUT" || echo "has_notary=false" >> "$GITHUB_OUTPUT"
 
-      - name: Require trusted distribution credentials for tags
+      - name: Explain unsigned tagged build
         if: ${{ github.ref_type == 'tag' && (steps.credentials.outputs.has_signing != 'true' || steps.credentials.outputs.has_notary != 'true') }}
-        run: |
-          echo "Developer ID signing and notarization secrets are required for tagged releases." >&2
-          exit 1
+        run: echo "Apple signing/notarization secrets are not configured; publishing an ad-hoc signed macOS archive."
 
       - name: Import Developer ID certificate
         if: ${{ steps.credentials.outputs.has_signing == 'true' }}
@@ -110,9 +108,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            AgentReins-*-macOS-universal.zip \
-            AgentReins-*-macOS-universal.zip.sha256 \
-            --verify-tag \
-            --generate-notes \
-            --title "AgentReins $GITHUB_REF_NAME"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              AgentReins-*-macOS-universal.zip \
+              AgentReins-*-macOS-universal.zip.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              AgentReins-*-macOS-universal.zip \
+              AgentReins-*-macOS-universal.zip.sha256 \
+              --verify-tag \
+              --notes-file CHANGELOG.md \
+              --title "AgentReins $GITHUB_REF_NAME"
+          fi

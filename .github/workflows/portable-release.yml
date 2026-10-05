@@ -1,0 +1,119 @@
+name: Windows and Linux release artifacts
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install desktop build dependencies
+        shell: pwsh
+        run: python -m pip install --upgrade pyinstaller pystray Pillow
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.Substring(1) } else { $version = '0.1.0-dev' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress --yes
+      - name: Build installer
+        shell: pwsh
+        env:
+          AGENTREINS_VERSION: ${{ steps.version.outputs.version }}
+        run: .\installers\windows\build-installer.ps1
+      - name: Create Windows checksums
+        shell: pwsh
+        run: |
+          Get-FileHash dist/AgentReins.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  AgentReins.exe" } | Set-Content -NoNewline dist/AgentReins.exe.sha256
+          Get-FileHash dist/AgentReinsNativeHost.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  AgentReinsNativeHost.exe" } | Set-Content -NoNewline dist/AgentReinsNativeHost.exe.sha256
+          Get-ChildItem dist/installer/*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Set-Content -NoNewline -Path "$($_.FullName).sha256" -Value "$hash  $($_.Name)"
+          }
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentReins-Windows-x64-Setup
+          path: |
+            dist/AgentReins.exe
+            dist/AgentReins.exe.sha256
+            dist/AgentReinsNativeHost.exe
+            dist/AgentReinsNativeHost.exe.sha256
+            dist/installer/*.exe
+            dist/installer/*.sha256
+          if-no-files-found: error
+      - name: Attach installer to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $found = $false
+          for ($attempt = 0; $attempt -lt 90; $attempt++) {
+            gh release view $env:GITHUB_REF_NAME *> $null
+            if ($LASTEXITCODE -eq 0) { $found = $true; break }
+            Start-Sleep -Seconds 20
+          }
+          if (-not $found) { throw "Release $env:GITHUB_REF_NAME was not created in time" }
+          gh release upload $env:GITHUB_REF_NAME dist/AgentReins.exe dist/AgentReins.exe.sha256 dist/AgentReinsNativeHost.exe dist/AgentReinsNativeHost.exe.sha256 dist/installer/*.exe dist/installer/*.sha256 --clobber
+
+  linux-packages:
+    name: Linux AppImage and Debian package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3-tk dpkg-dev
+          python -m pip install --upgrade pyinstaller pystray Pillow
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then version="${GITHUB_REF_NAME#v}"; else version="0.1.0-dev"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build Linux packages
+        env:
+          AGENTREINS_VERSION: ${{ steps.version.outputs.version }}
+        run: ./portable/package-linux.sh all
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentReins-Linux-packages
+          path: |
+            dist/AgentReins-*.AppImage
+            dist/AgentReins-*.AppImage.sha256
+            dist/AgentReins-*.deb
+            dist/AgentReins-*.deb.sha256
+          if-no-files-found: error
+      - name: Attach packages to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          for attempt in $(seq 1 90); do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then break; fi
+            if [[ "$attempt" == 90 ]]; then echo "Release $GITHUB_REF_NAME was not created in time" >&2; exit 1; fi
+            sleep 20
+          done
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/AgentReins-*.AppImage dist/AgentReins-*.AppImage.sha256 \
+            dist/AgentReins-*.deb dist/AgentReins-*.deb.sha256 --clobber

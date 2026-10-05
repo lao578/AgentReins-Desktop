@@ -161,10 +161,11 @@ See the [Trace, Verify, Recover roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) f
 ### Windows and Linux (portable runtime)
 
 SwiftUI/AppKit are Apple-only frameworks, so the Windows/Linux distribution is
-the headless local collector under [`portable/`](portable/README.md). It keeps
-the same normalized evidence boundary—Agent process lineage and TCP
-destinations—and writes versioned JSONL that can be consumed by a desktop or
-web UI. No third-party Python packages are required.
+the Tk desktop console plus the dependency-free collector under
+[`portable/`](portable/README.md). It keeps the same normalized evidence
+boundary—Agent process lineage, TCP destinations, file changes, and browser
+session/tool links—and writes versioned JSONL plus a local SQLite evidence
+database.
 
 ```bash
 # Linux
@@ -174,14 +175,28 @@ web UI. No third-party Python packages are required.
 .\portable\agentreins-portable.ps1 snapshot
 ```
 
+For the desktop console on Windows, download `AgentReins.exe` from the
+[v0.1.0 release](https://github.com/lao578/AgentReins-Desktop/releases/tag/v0.1.0)
+or use the Windows Setup installer. Linux users can download the AppImage or
+`.deb` from the same release; the Debian package includes the optional
+`systemd --user` collector service.
+
 Use `watch --output <file>` for a durable stream. The native browser bridge is
 installed with `BrowserExtension/install-native-host.ps1` on Windows or
 `BrowserExtension/install-native-host-linux.sh` on Linux.
 
+Tagged releases also publish Linux packages: an x86_64 AppImage and an
+amd64 `.deb`. Build them locally with `./portable/package-linux.sh all` after
+installing `python3-tk`, `dpkg-dev`, and PyInstaller. The Debian package
+includes the `agentreins` GUI launcher, the `agentreins-portable` CLI, and an
+optional per-user `agentreins.service` (enable it with
+`systemctl --user enable --now agentreins.service`).
+
 ### Requirements
 
 - macOS native console: macOS 13 or later, Xcode Command Line Tools, Swift 6 toolchain
-- Windows/Linux portable runtime: Python 3.9 or newer (standard library only)
+- Windows/Linux collector: Python 3.9 or newer (standard library only); the
+  optional Tk desktop tray uses `pystray` and Pillow.
 
 ### Development build
 

@@ -43,5 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AgentReins-Windows-x64
-          path: dist/AgentReins.exe
+          path: |
+            dist/AgentReins.exe
+            dist/AgentReinsNativeHost.exe
           if-no-files-found: error

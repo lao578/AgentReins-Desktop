@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AgentReins
+Comment=Local-first agent evidence collector
+Exec=agentreins-desktop
+Icon=agentreins
+Categories=Utility;System;Security;
+Terminal=false

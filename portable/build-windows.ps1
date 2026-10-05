@@ -32,6 +32,15 @@ catch {
     Invoke-Python @('-m', 'pip', 'install', '--user', '--upgrade', 'pyinstaller')
 }
 
+# Bundle the optional tray implementation in release builds. If installation
+# is unavailable, the application still has a taskbar-minimize fallback.
+try { Invoke-Python @('-c', 'import pystray, PIL') }
+catch {
+    Write-Host 'Optional tray dependencies not found; installing pystray and Pillow...'
+    try { Invoke-Python @('-m', 'pip', 'install', '--user', '--upgrade', 'pystray', 'Pillow') }
+    catch { Write-Warning 'Tray dependencies unavailable; continuing with taskbar fallback.' }
+}
+
 $spec = Join-Path $PSScriptRoot 'agentreins_desktop.spec'
 $args = @('-m', 'PyInstaller', '--noconfirm', '--clean', $spec)
 if ($Clean) {
@@ -54,3 +63,17 @@ if (-not (Test-Path $output)) {
     throw "Build completed but expected executable was not found at $output"
 }
 Write-Host "Built $output"
+
+# Build the Native Messaging host separately. It intentionally has no console
+# window and uses the same Python runtime as the desktop shell. The installer
+# registers this executable with Chrome/Edge after copying it to {app}.
+$nativeEntry = Join-Path $PSScriptRoot 'native_host.py'
+Push-Location $root
+try {
+    Invoke-Python @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--name', 'AgentReinsNativeHost', '--console', $nativeEntry)
+} finally {
+    Pop-Location
+}
+$nativeOutput = Join-Path $root 'dist\AgentReinsNativeHost.exe'
+if (-not (Test-Path $nativeOutput)) { throw "Native host build completed but expected executable was not found at $nativeOutput" }
+Write-Host "Built $nativeOutput"
