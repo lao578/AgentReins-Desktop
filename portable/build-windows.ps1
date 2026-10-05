@@ -12,6 +12,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+$buildVersion = if ($env:AGENTREINS_VERSION) { $env:AGENTREINS_VERSION.Trim().TrimStart('v', 'V') } else { '0.1.1' }
+if ($buildVersion -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "AGENTREINS_VERSION must be semantic version text (got '$buildVersion')"
+}
+$buildVersionDir = Join-Path $root 'build\agentreins-version'
 $python = Get-Command py -ErrorAction SilentlyContinue
 if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
 if (-not $python) { throw 'Python 3.9 or newer is required. Install it from python.org.' }
@@ -46,10 +51,12 @@ $args = @('-m', 'PyInstaller', '--noconfirm', '--clean', $spec)
 if ($Clean) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $root 'build'), (Join-Path $root 'dist')
 }
+New-Item -ItemType Directory -Force -Path $buildVersionDir | Out-Null
+Set-Content -LiteralPath (Join-Path $buildVersionDir 'agentreins_build_version.py') -Value "VERSION = '$buildVersion'" -Encoding ascii
 if ($OneDir) {
     # One-dir builds are useful for debugging startup failures and are
     # selected with a direct CLI rebuild instead of the one-file spec.
-    $args = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', 'AgentReins', (Join-Path $PSScriptRoot 'agentreins_desktop.py'))
+    $args = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', 'AgentReins', '--paths', $buildVersionDir, (Join-Path $PSScriptRoot 'agentreins_desktop.py'))
 }
 Push-Location $root
 try {

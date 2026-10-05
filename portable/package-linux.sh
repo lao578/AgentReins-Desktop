@@ -10,10 +10,11 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 VERSION="${AGENTREINS_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
-  VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo 0.1.0)"
+  VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo 0.1.1)"
 fi
 VERSION="${VERSION#v}"
 VERSION="${VERSION//[^A-Za-z0-9.+~-]/-}"
+export AGENTREINS_VERSION="$VERSION"
 ARCH="${AGENTREINS_ARCH:-x86_64}"
 OUT="$ROOT/dist"
 BUILD="$ROOT/build/linux-package"
@@ -106,6 +107,7 @@ make_deb() {
   fi
   cp -a "$OUT/AgentReins" "$root/usr/lib/agentreins/AgentReins"
   cp "$ROOT/portable/agentreins_portable.py" "$root/usr/lib/agentreins/agentreins_portable.py"
+  cp "$ROOT/portable/agent_adapters.py" "$root/usr/lib/agentreins/agent_adapters.py"
   if [[ -f "$ROOT/Assets/agentreins-logo.png" ]]; then
     cp "$ROOT/Assets/agentreins-logo.png" "$root/usr/share/icons/hicolor/512x512/apps/agentreins.png"
   fi

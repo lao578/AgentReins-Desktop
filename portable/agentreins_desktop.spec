@@ -12,15 +12,16 @@ except ImportError:
 
 ROOT = Path(SPECPATH).parent
 ENTRY = ROOT / "portable" / "agentreins_desktop.py"
+BUILD_VERSION_DIR = ROOT / "build" / "agentreins-version"
 
 a = Analysis(
     [str(ENTRY)],
-    pathex=[str(ROOT / "portable"), str(ROOT)],
+    pathex=[str(ROOT / "portable"), str(ROOT), str(BUILD_VERSION_DIR)],
     binaries=[],
     datas=[],
     # The desktop shell loads tray support lazily so source runs remain
     # dependency-free. Include it in release binaries when installed.
-    hiddenimports=tray_imports,
+    hiddenimports=tray_imports + ["update_checker", "agent_adapters"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

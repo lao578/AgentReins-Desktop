@@ -6,6 +6,16 @@ set -euo pipefail
 # reliable Linux binary from Windows or macOS.
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
+BUILD_VERSION="${AGENTREINS_VERSION:-0.1.1}"
+BUILD_VERSION="${BUILD_VERSION#v}"
+BUILD_VERSION="${BUILD_VERSION#V}"
+if [[ ! "$BUILD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+  echo "AGENTREINS_VERSION must be semantic version text (got '$BUILD_VERSION')." >&2
+  exit 2
+fi
+BUILD_VERSION_DIR="$ROOT/build/agentreins-version"
+mkdir -p "$BUILD_VERSION_DIR"
+printf 'VERSION = "%s"\n' "$BUILD_VERSION" > "$BUILD_VERSION_DIR/agentreins_build_version.py"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "build-linux.sh must run on Linux (use GitHub Actions for a release build)." >&2
@@ -37,6 +47,7 @@ fi
   --distpath "$ROOT/dist" \
   --workpath "$ROOT/build/pyinstaller-linux" \
   --specpath "$ROOT/build/pyinstaller-linux" \
+  --paths "$BUILD_VERSION_DIR" \
   "${tray_args[@]}" \
   "$ROOT/portable/agentreins_desktop.py"
 

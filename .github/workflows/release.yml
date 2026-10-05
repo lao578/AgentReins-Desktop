@@ -40,9 +40,9 @@ jobs:
           [[ -n "$CERTIFICATE_P12" ]] && echo "has_signing=true" >> "$GITHUB_OUTPUT" || echo "has_signing=false" >> "$GITHUB_OUTPUT"
           [[ -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_PASSWORD" ]] && echo "has_notary=true" >> "$GITHUB_OUTPUT" || echo "has_notary=false" >> "$GITHUB_OUTPUT"
 
-      - name: Explain unsigned tagged build
+      - name: Report unsigned or unnotarized release
         if: ${{ github.ref_type == 'tag' && (steps.credentials.outputs.has_signing != 'true' || steps.credentials.outputs.has_notary != 'true') }}
-        run: echo "Apple signing/notarization secrets are not configured; publishing an ad-hoc signed macOS archive."
+        run: echo "::warning::Apple signing/notarization secrets are incomplete; the macOS archive will be ad-hoc signed or Developer ID signed without notarization. This artifact may trigger Gatekeeper warnings."
 
       - name: Import Developer ID certificate
         if: ${{ steps.credentials.outputs.has_signing == 'true' }}

@@ -32,11 +32,31 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+try:
+    from agent_adapters import NativeSessionReader
+except ImportError:  # package import via ``portable.agentreins_portable``
+    from .agent_adapters import NativeSessionReader
 
-VERSION = os.environ.get("AGENTREINS_VERSION", "0.1.0").lstrip("v")
+
+def resolve_build_version(build_version: Optional[str] = None) -> str:
+    """Resolve a baked release version, falling back to source/development."""
+
+    if build_version:
+        return str(build_version).strip().lstrip("vV")
+    return os.environ.get("AGENTREINS_VERSION", "0.1.1").strip().lstrip("vV")
+
+
+try:
+    # PyInstaller release builds add this generated module from the ignored
+    # build/ directory. Source checkouts intentionally do not track it.
+    from agentreins_build_version import VERSION as _BUILD_VERSION
+except ImportError:
+    _BUILD_VERSION = None
+
+VERSION = resolve_build_version(_BUILD_VERSION)
 SCHEMA_VERSION = 2
 INTERNAL_EVIDENCE_NAMES = {
-    "evidence.jsonl", "evidence.sqlite3", "evidence.sqlite3-wal", "evidence.sqlite3-shm", "web-agent-events.jsonl"
+    "evidence.jsonl", "evidence.sqlite3", "evidence.sqlite3-wal", "evidence.sqlite3-shm", "web-agent-events.jsonl", "etw-events.jsonl"
 }
 AGENT_MARKERS = {
     # The desktop ChatGPT host is the Codex runtime in the macOS adapter too.
@@ -77,6 +97,7 @@ class FileChangeRecord:
     source: str
     timestamp: str
     is_directory: bool = False
+    details: Optional[dict[str, object]] = None
 
 
 class WebEvidenceReader:
@@ -219,7 +240,8 @@ class EvidenceStore:
         for event in events:
             cursor = self.connection.execute(
                 "INSERT INTO file_events(timestamp,path,action,source,is_directory,details) VALUES(?,?,?,?,?,?)",
-                (event.timestamp, event.path, event.action, event.source, int(event.is_directory), "{}"),
+                (event.timestamp, event.path, event.action, event.source, int(event.is_directory),
+                 json.dumps(event.details or {}, ensure_ascii=True, sort_keys=True)),
             )
             ids.append(int(cursor.lastrowid))
             if context:
@@ -244,7 +266,11 @@ class EvidenceStore:
             provider = str(event.get("provider") or "") or None
             session_id = str(event.get("sessionId") or (f"{provider}:web" if provider else "")) or None
             turn_id = str(event.get("turnId") or (event_id if event_type == "prompt" else "")) or None
-            tool_call_id = str(event.get("toolCallId") or (event_id if event_type in {"upload", "tool", "tool_call", "tool_result"} else "")) or None
+            raw_tool_call_id = str(event.get("toolCallId") or (event_id if event_type in {"upload", "tool", "tool_call", "tool_result"} else "")) or None
+            # Provider-issued tool IDs are commonly only unique inside a
+            # session. Namespace them in SQLite while preserving the original
+            # ID in the lossless event payload.
+            tool_call_id = f"{session_id}:{raw_tool_call_id}" if session_id and raw_tool_call_id else raw_tool_call_id
             payload = json.dumps(event, ensure_ascii=True, sort_keys=True)
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO web_events(event_id,event_type,provider,session_id,turn_id,tool_call_id,observed_at,payload) VALUES(?,?,?,?,?,?,?,?)",
@@ -261,7 +287,11 @@ class EvidenceStore:
                 )
             if tool_call_id:
                 tool_name = str(event.get("toolName") or ("browser.upload" if event_type == "upload" else event_type))
-                status = "completed" if event_type in {"upload", "tool_result", "response"} else "observed"
+                status = "requested" if event_type == "tool_call" else "failed" if event.get("action") == "failed" else "completed" if event_type in {"upload", "tool_result", "response"} else "observed"
+                if event_type == "tool_result":
+                    # A result updates the row created by its matching call,
+                    # keeping call/result evidence joined by native call ID.
+                    tool_name = str(event.get("toolName") or tool_name)
                 self.connection.execute(
                     "INSERT INTO tool_calls(tool_call_id,session_id,turn_id,tool_name,status,first_seen,last_seen,payload) VALUES(?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(tool_call_id) DO UPDATE SET last_seen=excluded.last_seen,status=excluded.status,payload=excluded.payload",
@@ -465,8 +495,132 @@ class PollingFileWatcher:
         return None
 
 
-def create_file_watcher(paths: Iterable[Path]):
-    return LinuxInotifyWatcher(paths) if platform.system().lower() == "linux" else PollingFileWatcher(paths)
+class EtwJsonlWatcher:
+    """Read metadata-only file records emitted by the optional elevated ETW helper.
+
+    Status records establish whether the helper is currently alive. A heartbeat
+    expiry returns control to polling, so a crashed helper never silently stops
+    file observation.
+    """
+
+    HEARTBEAT_TTL_SECONDS = 15.0
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.offset = 0
+        self._fingerprint: tuple[int, int] | None = None
+        self._active_until = 0.0
+        self.roots: tuple[Path, ...] = ()
+
+    @property
+    def active(self) -> bool:
+        return time.monotonic() < self._active_until
+
+    def poll(self) -> list[FileChangeRecord]:
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return []
+        fingerprint = (int(getattr(stat, "st_ino", 0)), int(stat.st_size))
+        if self._fingerprint and (fingerprint[0] != self._fingerprint[0] or fingerprint[1] < self.offset):
+            self.offset = 0
+        self._fingerprint = fingerprint
+        records: list[FileChangeRecord] = []
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(self.offset)
+                for raw in handle:
+                    self.offset += len(raw)
+                    try:
+                        value = json.loads(raw.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(value, dict):
+                        continue
+                    if value.get("recordType") == "status" and value.get("source") == "windows-etw":
+                        status = str(value.get("status", ""))
+                        roots = value.get("roots")
+                        if isinstance(roots, list):
+                            self.roots = tuple(Path(str(root)) for root in roots if str(root))
+                        if status in {"started", "heartbeat"}:
+                            self._active_until = time.monotonic() + self.HEARTBEAT_TTL_SECONDS
+                        elif status in {"stopped", "error"}:
+                            self._active_until = 0.0
+                        continue
+                    if value.get("recordType") != "file_event" or value.get("source") != "windows-etw":
+                        continue
+                    path = str(value.get("path") or "")
+                    action = str(value.get("action") or "modify")
+                    if not path:
+                        continue
+                    details = {key: item for key, item in value.items()
+                               if key not in {"recordType", "timestamp", "path", "action", "source", "isDirectory"}}
+                    records.append(FileChangeRecord(
+                        path=path,
+                        action=action,
+                        source="windows-etw",
+                        timestamp=str(value.get("timestamp") or utc_now()),
+                        is_directory=bool(value.get("isDirectory", False)),
+                        details=details,
+                    ))
+        except OSError:
+            return records
+        return records
+
+    def close(self) -> None:
+        return None
+
+
+class WindowsEtwWatcher:
+    """Prefer an explicitly started ETW helper, otherwise retain polling coverage."""
+
+    def __init__(self, paths: Iterable[Path], event_path: Path):
+        self._default_paths = tuple(Path(path) for path in paths)
+        self.polling = PollingFileWatcher(self._default_paths)
+        self.etw = EtwJsonlWatcher(event_path)
+        self._configured_roots: tuple[str, ...] = ()
+        self._was_active = False
+
+    def poll(self) -> list[FileChangeRecord]:
+        events = self.etw.poll()
+        roots = tuple(str(path) for path in self.etw.roots)
+        if roots and roots != self._configured_roots:
+            # Follow the helper's explicit allowlist for fallback too, including
+            # when the desktop UI did not have a custom watch-path control.
+            self.polling = PollingFileWatcher(self.etw.roots)
+            self._configured_roots = roots
+        if self.etw.active:
+            self._was_active = True
+            return events
+        if self._was_active:
+            # Avoid replaying the entire ETW-active period as duplicate polling
+            # events when the helper exits. Future mutations remain covered;
+            # while ETW is active we skip recursive polling to keep the opt-in
+            # path meaningfully event-driven.
+            self.polling._prime()
+            self._was_active = False
+            return events
+        return self.polling.poll() + events
+
+    @property
+    def mode(self) -> str:
+        return "windows-etw" if self.etw.active else "windows-polling"
+
+    def close(self) -> None:
+        self.etw.close()
+        self.polling.close()
+
+
+def create_file_watcher(paths: Iterable[Path], use_etw: bool = False, etw_events: Optional[Path] = None):
+    system = platform.system().lower()
+    if system == "linux":
+        return LinuxInotifyWatcher(paths)
+    if system == "windows":
+        if use_etw:
+            path = etw_events or Path(platform_paths()["etwEvents"])
+            return WindowsEtwWatcher(paths, path)
+        return PollingFileWatcher(paths)
+    return PollingFileWatcher(paths)
 
 
 def utc_now() -> str:
@@ -496,6 +650,7 @@ def platform_paths() -> dict[str, str]:
         "cache": str(cache / "AgentReins"),
         "evidence": str(data / "AgentReins" / "evidence.jsonl"),
         "database": str(data / "AgentReins" / "evidence.sqlite3"),
+        "etwEvents": str(data / "AgentReins" / "etw-events.jsonl"),
         "webEvidence": str(data / "AgentReins" / "web-agent-events.jsonl"),
     }
 
@@ -700,7 +855,7 @@ def agent_summary(items: Iterable[ProcessRecord]) -> list[dict[str, object]]:
 def snapshot() -> dict[str, object]:
     procs = processes()
     system = platform.system().lower()
-    capabilities = ["processExecution", "processLineage", "networkConnection", "sqliteEvidence", "agentSessionCorrelation", "toolCallCorrelation"]
+    capabilities = ["processExecution", "processLineage", "networkConnection", "sqliteEvidence", "agentSessionCorrelation", "toolCallCorrelation", "nativeSessionAdapters"]
     if system == "linux":
         capabilities.append("fileChangeInotify")
     elif system == "windows":
@@ -708,6 +863,7 @@ def snapshot() -> dict[str, object]:
         # session without changing the user's tracing policy. We expose the
         # actual release capability (polling) rather than claiming ETW data.
         capabilities.append("fileChangePolling")
+        capabilities.append("fileChangeEtwOptIn")
     else:
         capabilities.append("fileChangePolling")
     return {
@@ -750,6 +906,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     watch.add_argument("--output", type=Path, help="JSONL destination; stdout when omitted")
     watch.add_argument("--database", type=Path, help="SQLite evidence database")
     watch.add_argument("--watch-path", action="append", type=Path, default=[], help="directory/file to monitor")
+    watch.add_argument("--etw", action="store_true", help="prefer the optional elevated Windows ETW helper; automatically falls back to polling")
+    watch.add_argument("--etw-events", type=Path, help="ETW helper JSONL path (defaults to the AgentReins data directory)")
     args = parser.parse_args(argv)
     if args.command == "paths":
         print(json.dumps(platform_paths(), ensure_ascii=False, indent=2, sort_keys=True))
@@ -762,18 +920,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     database = args.database or Path(paths["database"])
     store = EvidenceStore(database)
     watch_paths = args.watch_path or [Path(paths["data"])]
-    file_watcher = create_file_watcher(watch_paths)
+    file_watcher = create_file_watcher(watch_paths, use_etw=args.etw, etw_events=args.etw_events)
     web_reader = WebEvidenceReader(Path(paths["webEvidence"]))
+    native_reader = NativeSessionReader()
     try:
         while True:
             started = time.monotonic()
             record = snapshot()
             file_events = file_watcher.poll()
             web_events = web_reader.poll()
+            native_events = native_reader.poll()
             record["fileEvents"] = [asdict(event) for event in file_events]
             record["webEvents"] = web_events
+            record["nativeEvents"] = native_events
+            if isinstance(file_watcher, WindowsEtwWatcher):
+                record["fileWatcher"] = file_watcher.mode
             write_snapshot(record, args.output)
-            store.append_web_events(web_events)
+            store.append_web_events([*web_events, *native_events])
             store.append_snapshot(record)
             store.append_file_events(file_events, store.latest_context())
             time.sleep(max(0, interval - (time.monotonic() - started)))

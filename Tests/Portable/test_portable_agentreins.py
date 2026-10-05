@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "portable"))
 SPEC = importlib.util.spec_from_file_location("agentreins_portable", ROOT / "portable" / "agentreins_portable.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -17,6 +18,12 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PortableRuntimeTests(unittest.TestCase):
+    def test_build_version_resolver_normalizes_tags_and_defaults(self):
+        self.assertEqual(MODULE.resolve_build_version("v1.2.3"), "1.2.3")
+        self.assertEqual(MODULE.resolve_build_version("V0.1.1"), "0.1.1")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(MODULE.resolve_build_version(), "0.1.1")
+
     def test_paths_follow_xdg_on_linux(self):
         with patch.object(MODULE.platform, "system", return_value="Linux"), patch.dict(
             os.environ, {"XDG_DATA_HOME": "/tmp/xdg-data", "XDG_CONFIG_HOME": "/tmp/xdg-config", "XDG_CACHE_HOME": "/tmp/xdg-cache"}, clear=False
@@ -73,6 +80,24 @@ class PortableRuntimeTests(unittest.TestCase):
         self.assertEqual(sessions, 1)
         self.assertEqual(tools, [("browser.upload",)])
         self.assertEqual(links, 1)
+
+    def test_optional_etw_jsonl_watcher_reads_events_and_tracks_heartbeat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "etw-events.jsonl"
+            path.write_text(json.dumps({
+                "recordType": "status", "source": "windows-etw", "status": "started"
+            }) + "\n" + json.dumps({
+                "recordType": "file_event", "source": "windows-etw", "path": "C:/work/a.txt",
+                "action": "modify", "timestamp": "2026-10-05T00:00:00Z", "processId": 42,
+                "operation": "write", "sizeBytes": 12
+            }) + "\n", encoding="utf-8")
+            watcher = MODULE.EtwJsonlWatcher(path)
+            events = watcher.poll()
+            self.assertTrue(watcher.active)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].source, "windows-etw")
+            self.assertEqual(events[0].details["processId"], 42)
+            self.assertEqual(watcher.poll(), [])
 
 
 if __name__ == "__main__":

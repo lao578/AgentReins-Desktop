@@ -176,7 +176,7 @@ database.
 ```
 
 For the desktop console on Windows, download `AgentReins.exe` from the
-[v0.1.0 release](https://github.com/lao578/AgentReins-Desktop/releases/tag/v0.1.0)
+[latest release](https://github.com/lao578/AgentReins-Desktop/releases/latest)
 or use the Windows Setup installer. Linux users can download the AppImage or
 `.deb` from the same release; the Debian package includes the optional
 `systemd --user` collector service.

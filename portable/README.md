@@ -22,8 +22,30 @@ requires administrator/root privileges.
 `paths` prints the resolved data/config/cache locations. The output is JSONL
 with `schemaVersion: 2`; `watch` also writes a WAL-backed SQLite database and
 records file events. Linux uses inotify when available. Windows uses a safe
-polling fallback in restricted environments; an ETW provider can be enabled
-later without changing the normalized event schema.
+polling fallback. An optional elevated ETW helper can be enabled explicitly
+with `watch --etw`; if its JSONL heartbeat expires, polling continues
+automatically. ETW is never started implicitly.
+
+## Native Agent sessions
+
+The portable watcher also has best-effort, read-only adapters for local
+Codex, Claude Code, Qoder, WorkBuddy, Kiro, and Cursor evidence. JSON/JSONL
+adapters tail recent transcript records; Cursor's `state.vscdb` adapter opens
+the database read-only and projects the latest Composer bubbles. Captured
+native events use the existing schema version 2 with stable event IDs and
+session/turn/tool-call references, and are projected into the SQLite
+`sessions`, `tool_calls`, and `evidence_links` tables. Provider tool IDs are
+namespaced by session in SQLite to avoid cross-session collisions.
+
+Transcript layouts are provider-private and may change between releases, so
+these adapters are intentionally defensive and do not claim complete history.
+At startup they read a bounded tail of recent transcripts; subsequent polls
+follow appended complete JSONL rows. Cursor support requires the expected
+`composerHeaders` and `cursorDiskKV` tables. If an adapter cannot read a source
+or encounters an unknown row, process/network/file collection continues.
+Session transcripts may contain prompts, responses, and tool arguments; they
+are stored locally in the configured evidence database/JSONL and are not sent
+to AgentReins servers.
 
 ## Windows desktop executable
 
@@ -97,9 +119,22 @@ The SQLite database contains `snapshots`, `file_events`, `web_events`,
 `sessions`, `tool_calls`, and `evidence_links`. Browser Native-Messaging
 events are projected into sessions/tool calls; file changes are linked to the
 most recent observed session/tool context with `inferred` confidence. Linux
-uses recursive inotify watches. Windows uses a safe polling watcher in this
-release; kernel ETW is not started implicitly because doing so changes system
-tracing policy and commonly needs elevated rights.
+uses recursive inotify watches. Windows uses polling by default; run the
+separately packaged `AgentReinsEtwHelper.exe` as Administrator with `--root`
+and pass the same root to `watch --etw --watch-path <root>` to opt in. The
+helper's default event log is `%APPDATA%\AgentReins\etw-events.jsonl`; use
+`--etw-events` on both processes only if you need a different location. The
+desktop can be started with `--start-watch --etw`. Kernel ETW is not started
+implicitly because it changes system tracing policy and commonly needs
+elevated rights. If the helper is missing, denied, or stops heartbeating, the
+collector falls back to polling.
+
+Example (use an elevated terminal for the helper, then start the UI normally):
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\AgentReins\ETW\AgentReinsEtwHelper.exe" --root "$env:USERPROFILE\Projects"
+& "$env:LOCALAPPDATA\Programs\AgentReins\AgentReins.exe" --start-watch --etw
+```
 
 ### Platform collectors
 

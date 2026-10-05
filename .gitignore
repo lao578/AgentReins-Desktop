@@ -11,3 +11,7 @@ build/
 dist/
 *.spec
 !portable/agentreins_desktop.spec
+
+# .NET build outputs
+**/bin/
+**/obj/

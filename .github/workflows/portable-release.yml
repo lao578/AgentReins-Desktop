@@ -24,21 +24,71 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.Substring(1) } else { $version = '0.1.0-dev' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.Substring(1) } else { $version = '0.1.1-dev' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress --yes
+      - name: Install .NET 8 SDK for optional ETW helper
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build optional ETW helper
+        shell: pwsh
+        run: .\windows\AgentReinsEtw\build.ps1
+      - name: Prepare optional Authenticode signing
+        id: windows-signing
+        shell: pwsh
+        env:
+          SIGN_CERT_P12: ${{ secrets.WINDOWS_SIGNING_CERT_P12 }}
+          SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          IS_PUBLIC_RELEASE: ${{ github.ref_type == 'tag' }}
+        run: |
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:SIGN_CERT_P12)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:SIGN_CERT_PASSWORD)
+          if ($hasCertificate -ne $hasPassword) {
+            throw 'Configure both WINDOWS_SIGNING_CERT_P12 and WINDOWS_SIGNING_CERT_PASSWORD, or neither.'
+          }
+          if (-not $hasCertificate) {
+            'has_signing=false' >> $env:GITHUB_OUTPUT
+            if ($env:IS_PUBLIC_RELEASE -eq 'true') {
+              Write-Host 'No Authenticode secrets configured; Windows tag artifacts will be unsigned.'
+            } else {
+              Write-Host 'No Authenticode secrets configured; development artifacts will be unsigned.'
+            }
+            exit 0
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP 'agentreins-codesign.pfx'
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:SIGN_CERT_P12))
+          "AGENTREINS_WINDOWS_SIGN_CERT=$certificate" >> $env:GITHUB_ENV
+          'has_signing=true' >> $env:GITHUB_OUTPUT
       - name: Build installer
         shell: pwsh
         env:
           AGENTREINS_VERSION: ${{ steps.version.outputs.version }}
+          AGENTREINS_WINDOWS_SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
         run: .\installers\windows\build-installer.ps1
+      - name: Report Windows signature status
+        shell: pwsh
+        env:
+          EXPECT_SIGNED: ${{ steps.windows-signing.outputs.has_signing }}
+        run: |
+          $files = @('dist/AgentReins.exe', 'dist/AgentReinsNativeHost.exe', 'dist/etw-helper/AgentReinsEtwHelper.exe') + @(Get-ChildItem dist/installer/*.exe | ForEach-Object { $_.FullName })
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            if ($env:EXPECT_SIGNED -eq 'true') {
+              if ($signature.Status -ne 'Valid') { throw "Expected a valid Authenticode signature for $file, got $($signature.Status)" }
+              Write-Host "$file : Authenticode valid ($($signature.SignerCertificate.Thumbprint))"
+            } else {
+              Write-Host "$file : $($signature.Status) (unsigned release build)"
+            }
+          }
       - name: Create Windows checksums
         shell: pwsh
         run: |
           Get-FileHash dist/AgentReins.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  AgentReins.exe" } | Set-Content -NoNewline dist/AgentReins.exe.sha256
           Get-FileHash dist/AgentReinsNativeHost.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  AgentReinsNativeHost.exe" } | Set-Content -NoNewline dist/AgentReinsNativeHost.exe.sha256
+          Get-FileHash dist/etw-helper/AgentReinsEtwHelper.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  AgentReinsEtwHelper.exe" } | Set-Content -NoNewline dist/etw-helper/AgentReinsEtwHelper.exe.sha256
           Get-ChildItem dist/installer/*.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             Set-Content -NoNewline -Path "$($_.FullName).sha256" -Value "$hash  $($_.Name)"
@@ -52,6 +102,8 @@ jobs:
             dist/AgentReins.exe.sha256
             dist/AgentReinsNativeHost.exe
             dist/AgentReinsNativeHost.exe.sha256
+            dist/etw-helper/AgentReinsEtwHelper.exe
+            dist/etw-helper/AgentReinsEtwHelper.exe.sha256
             dist/installer/*.exe
             dist/installer/*.sha256
           if-no-files-found: error
@@ -68,7 +120,7 @@ jobs:
             Start-Sleep -Seconds 20
           }
           if (-not $found) { throw "Release $env:GITHUB_REF_NAME was not created in time" }
-          gh release upload $env:GITHUB_REF_NAME dist/AgentReins.exe dist/AgentReins.exe.sha256 dist/AgentReinsNativeHost.exe dist/AgentReinsNativeHost.exe.sha256 dist/installer/*.exe dist/installer/*.sha256 --clobber
+          gh release upload $env:GITHUB_REF_NAME dist/AgentReins.exe dist/AgentReins.exe.sha256 dist/AgentReinsNativeHost.exe dist/AgentReinsNativeHost.exe.sha256 dist/etw-helper/AgentReinsEtwHelper.exe dist/etw-helper/AgentReinsEtwHelper.exe.sha256 dist/installer/*.exe dist/installer/*.sha256 --clobber
 
   linux-packages:
     name: Linux AppImage and Debian package
@@ -87,7 +139,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then version="${GITHUB_REF_NAME#v}"; else version="0.1.0-dev"; fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then version="${GITHUB_REF_NAME#v}"; else version="0.1.1-dev"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build Linux packages
         env:
