@@ -1,10 +1,38 @@
 import Foundation
+
+// The native-messaging bridge is intentionally Foundation-only.  Keep the
+// small amount of POSIX code behind conditional imports so the same target can
+// be built by Swift on macOS, Linux, and Windows.  Windows has no `flock`, so
+// the single host process uses an in-process lock for the append operation.
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 private let maximumMessageBytes = 4 * 1_024 * 1_024
 private let allowedExtensionOrigin = "chrome-extension://hcmoeaheokpfbbggdmkdeaiokakiampk/"
 private let allowedWebAIHosts: Set<String> = ["grok.com", "gemini.google.com", "chatgpt.com", "claude.ai"]
 private let isTestOutput = CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--output"
+
+#if os(Windows)
+/// Swift Foundation on Windows does not expose POSIX `flock`.  A native
+/// messaging host is single-process, therefore an in-process mutex gives the
+/// same serialization guarantee for concurrent messages while retaining the
+/// exact append format used on Unix hosts.
+private let evidenceAppendLock = NSLock()
+#endif
+
+private func terminateProcess(_ code: Int32) -> Never {
+#if os(Windows)
+    // The Windows Foundation overlay does not guarantee a C `exit` symbol.
+    // `fatalError` still terminates the host with a non-zero status and keeps
+    // the origin check fail-closed.
+    fatalError("AgentReinsNativeHost refused the caller (exit code \(code))")
+#else
+    exit(code)
+#endif
+}
 
 private func readExactly(_ count: Int, from input: FileHandle) throws -> Data? {
     var data = Data()
@@ -34,7 +62,14 @@ private func appendEvidence(_ object: [String: Any]) throws -> Bool {
         destination = URL(fileURLWithPath: testPath)
     } else {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+#if os(macOS)
+        // Keep the original macOS SwiftUI data contract unchanged.
         destination = base.appendingPathComponent("AgentGuard/web-agent-events.jsonl")
+#else
+        // Portable collectors use the neutral product directory on Linux and
+        // Windows instead of the historical AgentGuard compatibility name.
+        destination = base.appendingPathComponent("AgentReins/web-agent-events.jsonl")
+#endif
     }
     let directory = destination.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -44,6 +79,13 @@ private func appendEvidence(_ object: [String: Any]) throws -> Bool {
         FileManager.default.createFile(atPath: destination.path, contents: nil)
     }
     let handle = try FileHandle(forWritingTo: destination)
+#if os(Windows)
+    evidenceAppendLock.lock()
+    defer {
+        evidenceAppendLock.unlock()
+        try? handle.close()
+    }
+#else
     guard flock(handle.fileDescriptor, LOCK_EX) == 0 else {
         try? handle.close()
         throw POSIXError(.EWOULDBLOCK)
@@ -52,6 +94,7 @@ private func appendEvidence(_ object: [String: Any]) throws -> Bool {
         flock(handle.fileDescriptor, LOCK_UN)
         try? handle.close()
     }
+#endif
     try handle.seekToEnd()
     try handle.write(contentsOf: line)
     try handle.synchronize()
@@ -62,7 +105,7 @@ let input = FileHandle.standardInput
 let output = FileHandle.standardOutput
 
 if !isTestOutput && !CommandLine.arguments.dropFirst().contains(allowedExtensionOrigin) {
-    exit(3)
+    terminateProcess(3)
 }
 
 while let header = try readExactly(4, from: input), header.count == 4 {

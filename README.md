@@ -5,11 +5,11 @@
 
   <p><strong>Make every AI agent understandable, verifiable, and trustworthy.</strong></p>
 
-  <p>A local-first safety and transparency companion for personal AI coding agents on macOS.</p>
+  <p>A local-first safety and transparency companion for personal AI coding agents on macOS, Windows, and Linux.</p>
 
   <p>
     <a href="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml/badge.svg"></a>
-    <img alt="Platform: macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple">
+    <img alt="Platform: macOS, Windows, Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-111111">
     <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
     <img alt="Status: Alpha" src="https://img.shields.io/badge/status-alpha-F59E0B">
     <img alt="Local-first" src="https://img.shields.io/badge/privacy-local--first-2563EB">
@@ -158,11 +158,30 @@ See the [Trace, Verify, Recover roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) f
 
 ## Build and run
 
+### Windows and Linux (portable runtime)
+
+SwiftUI/AppKit are Apple-only frameworks, so the Windows/Linux distribution is
+the headless local collector under [`portable/`](portable/README.md). It keeps
+the same normalized evidence boundary—Agent process lineage and TCP
+destinations—and writes versioned JSONL that can be consumed by a desktop or
+web UI. No third-party Python packages are required.
+
+```bash
+# Linux
+./portable/agentreins-portable.sh snapshot
+
+# Windows PowerShell
+.\portable\agentreins-portable.ps1 snapshot
+```
+
+Use `watch --output <file>` for a durable stream. The native browser bridge is
+installed with `BrowserExtension/install-native-host.ps1` on Windows or
+`BrowserExtension/install-native-host-linux.sh` on Linux.
+
 ### Requirements
 
-- macOS 13 or later
-- Xcode Command Line Tools
-- Swift 6 toolchain
+- macOS native console: macOS 13 or later, Xcode Command Line Tools, Swift 6 toolchain
+- Windows/Linux portable runtime: Python 3.9 or newer (standard library only)
 
 ### Development build
 

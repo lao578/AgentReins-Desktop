@@ -5,3 +5,9 @@ AgentReins.app/
 *.dmg
 xcuserdata/
 DerivedData/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+!portable/agentreins_desktop.spec
