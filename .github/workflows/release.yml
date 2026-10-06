@@ -18,6 +18,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Set up release-contract runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate release tag and changelog
+        if: ${{ github.ref_type == 'tag' }}
+        run: python portable/release_contract.py --tag "$GITHUB_REF_NAME" --changelog CHANGELOG.md
+
       - name: Resolve version
         id: version
         shell: bash

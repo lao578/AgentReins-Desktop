@@ -20,6 +20,11 @@ Without Apple secrets, CI still publishes an ad-hoc-signed macOS development arc
 
 ## Create a release
 
+Use [RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md) for the stable promotion
+gate.  Every release workflow also runs the dependency-free release contract
+(`portable/release_contract.py`), which rejects malformed tags and tags whose
+exact version is missing from `CHANGELOG.md`.
+
 1. Confirm that the `main` workflow passes.
 2. Update user-facing release notes and decide the semantic version.
 3. Create and push an annotated tag:
@@ -31,6 +36,11 @@ Without Apple secrets, CI still publishes an ad-hoc-signed macOS development arc
 
 4. The workflow builds both architectures, signs/notarizes the macOS app when credentials exist, creates a ZIP archive and SHA-256 checksum, and publishes the GitHub Release. Windows/Linux jobs attach their packages and checksums to that same release. Windows artifacts are Authenticode-signed when both Windows signing secrets are set; the CI logs clearly state when the output is unsigned.
 5. Download the archive while signed out of GitHub and test it on clean Intel and Apple Silicon systems.
+
+The same workflows are used for candidate tags such as `v0.2.0-alpha`; a tag
+with a prerelease suffix is published as a GitHub prerelease.  A stable tag
+(`vX.Y.Z`) is only promoted after the checklist's signing and clean-environment
+gates pass.
 
 ## Architecture verification
 
