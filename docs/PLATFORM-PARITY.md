@@ -44,9 +44,9 @@ release notes do not claim source- or UI-level identity with macOS.
 | Prompt/model/tool/result lifecycle | `AgentSession` and adapter evidence with turn/tool correlation | Adapter events projected to sessions, timeline and tool calls; `TurnJournalStore` supports explicit begin/finish/ingest | Same | Partial: stable IDs and joins are present, but provider history and native lifecycle callbacks are incomplete |
 | Durable evidence | SQLite WAL, raw evidence, checkpoints, health, integrity and idempotent replay | SQLite WAL snapshots/file/web/session/tool/link tables plus journal and operations state; append-only SHA-256 evidence chain records payload digests and opaque source checkpoints | Same | Partial: chain integrity and source checkpoints are implemented; the native raw-evidence envelope and full idempotent replay contract still differ |
 | Browser Native Messaging | Swift host plus extension validation | Python host and install script; packaged Native Host executable | Python host packaged in AppImage/`.deb`, with per-user install command and manifest script | Near: protocol and validation are shared; AppImage users must extract the host before registering a stable path |
-| File monitoring | Protected paths, backup, diff, code scan, optional restoration; one-second polling | Polling by default; explicit opt-in ETW JSONL helper with heartbeat and fallback; in-app protected-file backup/restore | Recursive inotify with polling fallback; in-app protected-file backup/restore | Partial: event quality, overflow/heartbeat handling and full protection-rule UI still differ |
+| File monitoring | Protected paths, backup, diff, code scan, optional restoration; one-second polling | Polling by default; explicit opt-in ETW JSONL helper with heartbeat and fallback; in-app protected-file backup/restore, preview, rule update and stale-state feedback | Recursive inotify with polling fallback; in-app protected-file backup/restore, preview, rule update and stale-state feedback | Partial: event quality and OS-level semantics still differ |
 | Network evidence | PID-owned `lsof`, tool intent, Git/SSH projection, proxy destination refinement | PowerShell TCP snapshots scoped to Agent process tree plus adapter/tool intent and proxy refinement | `ss` snapshots scoped to Agent process tree plus adapter/tool intent | Partial: short-lived sockets and destination refinement differ by OS |
-| Memory inventory and sensitive finding scan | Memory files, rules, scan, redact/delete/edit/restore workflow | `MemoryAuditor` inventory/scan/redact/delete-line/edit/restore backend; Memory tab exposes scan, redact and restore | Same | Partial: per-finding delete-line/edit/undo controls and settings parity are not complete in Tk |
+| Memory inventory and sensitive finding scan | Memory files, rules, scan, redact/delete/edit/restore workflow | `MemoryAuditor` inventory/scan/redact/delete-line/edit/restore backend; Memory tab exposes scan, redact, delete-line, edit, undo/restore and settings | Same | Partial: secure credential-store and native editor presentation still differ |
 | Local semantic analysis | Redacts evidence, calls configured OpenAI-compatible endpoint, stores usage/result | Explicit Analysis tab/configure/analyze actions with local redaction and environment-only key | Same | Partial: secure OS credential-store integration and macOS result envelope are not yet matched |
 | Code security scanning | Generated/changed code scanner with findings in evidence | `safety_features` scanner and Security/Generated-code tables in UI; confidence and source details available in row inspector | Same | Partial: turn-integrated finding attribution and full inspector parity remain |
 | Independent verification | `ProjectVerifier` runs supported build/test commands and records exit/output | `TurnJournalStore.verify` detects Swift/Python/Node/Go/Rust commands, bounds output/time, and UI/CLI expose preview and execution | Same | Near: independent runs and evidence are implemented; project command coverage differs by platform |
@@ -84,8 +84,8 @@ Backend and UI coverage now differ as follows:
 | Backend operation | Current portable desktop surface | Remaining gap |
 | --- | --- | --- |
 | Code/tool/external/context assessments | Security and Generated code tables plus row detail; timeline/session/tool joins expose confidence | Add a richer source-event/rule inspector and turn-level attribution |
-| Protected-file `preview`, `restore`, `update_rule` | Protected-files table exposes protect, restore and remove actions; stale fingerprints are enforced by backend | Add explicit preview and rule-update/auto-restore controls with visible stale feedback |
-| Memory settings, scan, redact, delete-line, edit, restore | Memory tab exposes scan, folder scan, finding redact and restore | Add per-finding delete-line/edit/undo controls and settings editor |
+| Protected-file `preview`, `restore`, `update_rule` | Protected-files table exposes preview, rule update, restore and remove actions; stale fingerprints are enforced by backend | Native macOS rule editor and layout differ |
+| Memory settings, scan, redact, delete-line, edit, restore | Memory tab exposes scan, folder scan, finding redact, delete-line, edit and undo/restore plus settings editor | Native macOS editor and secure-store presentation differ |
 | Semantic configure/analyze/remove | AI analysis tab exposes endpoint/model/key-variable configuration and explicit analyze action after confirmation | Add configuration removal and clearer disabled/secure-store state; key is currently environment-backed |
 | Turn verify/recover | Verify/Recover tab and worker actions call verify, recovery-preview, then confirmation-gated recover; CLI exposes the same stages | Expand command detection and show richer independent stdout/stderr/timeout evidence |
 
@@ -158,25 +158,27 @@ are the reasons the matrix still contains `Partial` or `Near` entries.
 - **Remaining:** broader project command profiles (`pwsh`, `cmd`, native build
   executables), cancellation UX and richer stdout/stderr/timeout presentation.
 
-### P3: security and analysis — backend implemented, UI completion in progress
+### P3: security and analysis — backend and portable UI implemented
 
 - **Implemented:** generated-code/tool/external/context scanners; protected
-  files and backups; memory inventory and guarded redaction/edit/restore;
+  files and backups with preview/rule-update actions; memory inventory and
+  guarded redaction/edit/delete-line/undo/restore plus settings editor;
   explicit redacted OpenAI-compatible analysis; all are available through
   `OperationsRuntime` and the desktop's Security, Generated code, Protected,
   Memory and AI analysis pages.
-- **Remaining:** per-finding memory edit/delete/undo controls, protection preview
-  and rule-update controls, richer security inspectors, configuration removal,
-  and secure OS credential-store integration.
+- **Remaining:** richer security inspectors, configuration removal, and secure
+  OS credential-store integration. Portable controls are implemented but are
+  not a source-compatible SwiftUI editor.
 
 ### P4: native collection quality — platform fallback implemented
 
 - **Implemented:** Linux recursive inotify, Windows opt-in ETW JSONL helper with
   heartbeat/fallback, polling fallback on both platforms, explicit collector
   health/errors, process-tree scoping and proxy/destination refinement.
-- **Remaining:** live ETW heartbeat/rotation and inotify overflow/permission
-  fixtures, clean-VM package/service validation, signing/notarization and
-  automatic update rollout. Payload contents and remote-host filesystem
+- **Remaining:** clean-VM package/service validation, signing/notarization and
+  automatic update rollout. Deterministic ETW heartbeat/rotation and inotify
+  overflow/permission fixtures are covered by portable tests; live OS behavior
+  still needs manual validation. Payload contents and remote-host filesystem
   activity remain outside the local evidence boundary.
 ## Cross-platform fixture and acceptance plan
 

@@ -204,9 +204,31 @@ EOF
 set -eu
 exec /usr/share/agentreins/BrowserExtension/uninstall-native-host-linux.sh
 EOF
+  cat > "$root/usr/bin/agentreins-install-service" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemctl is required for the AgentReins user service" >&2
+  exit 2
+fi
+systemctl --user daemon-reload
+systemctl --user enable --now agentreins.service
+echo "AgentReins collector service enabled for the current user."
+EOF
+  cat > "$root/usr/bin/agentreins-uninstall-service" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user disable --now agentreins.service 2>/dev/null || true
+  systemctl --user daemon-reload 2>/dev/null || true
+fi
+echo "AgentReins collector service disabled. Evidence was preserved."
+EOF
   chmod +x "$root/usr/bin/agentreins" "$root/usr/bin/agentreins-portable" \
     "$root/usr/bin/agentreins-install-native-host" \
-    "$root/usr/bin/agentreins-uninstall-native-host"
+    "$root/usr/bin/agentreins-uninstall-native-host" \
+    "$root/usr/bin/agentreins-install-service" \
+    "$root/usr/bin/agentreins-uninstall-service"
   cat > "$root/usr/share/applications/agentreins.desktop" <<'EOF'
 [Desktop Entry]
 Name=AgentReins
@@ -224,9 +246,10 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/agentreins-portable watch --interval 2 --output %h/.local/share/AgentReins/evidence.jsonl
+ExecStart=/usr/bin/agentreins-portable watch --interval 2 --output %h/.local/share/AgentReins/evidence.jsonl --database %h/.local/share/AgentReins/evidence.sqlite3
 Restart=on-failure
 RestartSec=5
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -241,11 +264,11 @@ the packaged BrowserExtension directory into the browser if needed.
 Remove those manifests with `agentreins-uninstall-native-host`.
 
 Enable the per-user collector after installation:
-  systemctl --user daemon-reload
-  systemctl --user enable --now agentreins.service
+  agentreins-install-service
+  # (equivalent to systemctl --user enable --now agentreins.service)
 
 Stop/disable it with:
-  systemctl --user disable --now agentreins.service
+  agentreins-uninstall-service
 EOF
   local deb_arch="${AGENTREINS_DEB_ARCH:-}"
   if [[ -z "$deb_arch" ]]; then

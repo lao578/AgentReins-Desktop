@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -130,6 +131,94 @@ class PortableRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0].source, "windows-etw")
             self.assertEqual(events[0].details["processId"], 42)
             self.assertEqual(watcher.poll(), [])
+
+    def test_etw_partial_row_is_retried_after_log_rotation_safe_append(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "etw-events.jsonl"
+            status = json.dumps({"recordType": "status", "source": "windows-etw", "status": "started"}) + "\n"
+            event = json.dumps({"recordType": "file_event", "source": "windows-etw", "path": "C:/work/a.txt", "action": "modify"})
+            path.write_text(status + event[:20], encoding="utf-8")
+            watcher = MODULE.EtwJsonlWatcher(path)
+            self.assertEqual(watcher.poll(), [])
+            self.assertEqual(watcher.health["eventCount"], 0)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(event[20:] + "\n")
+            self.assertEqual(len(watcher.poll()), 1)
+            self.assertEqual(watcher.health["malformedCount"], 0)
+            # Replacing the JSONL file resets the cursor instead of dropping
+            # the first row in the new generation.
+            path.unlink()
+            path.write_text(status + event + "\n", encoding="utf-8")
+            watcher.poll()
+            self.assertEqual(watcher.health["rotationCount"], 1)
+
+    def test_etw_health_reports_missing_log_and_heartbeat_expiry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.jsonl"
+            watcher = MODULE.EtwJsonlWatcher(path)
+            self.assertEqual(watcher.poll(), [])
+            self.assertEqual(watcher.health["status"], "degraded")
+            path.write_text(json.dumps({"recordType": "status", "source": "windows-etw", "status": "started"}) + "\n", encoding="utf-8")
+            with patch.object(MODULE.time, "monotonic", return_value=100.0):
+                watcher.poll()
+                self.assertTrue(watcher.active)
+            with patch.object(MODULE.time, "monotonic", return_value=200.0):
+                self.assertTrue(watcher.health["heartbeatExpired"])
+
+    def test_inotify_overflow_is_health_degraded_and_re_registers(self):
+        # Keep the synthetic overflow fixture isolated from unrelated files in
+        # the runner's global temp directory. The fallback is deliberately
+        # initialized after the overflow, so a large shared /tmp would make
+        # this deterministic unit test needlessly slow and race with cleanup.
+        with tempfile.TemporaryDirectory() as directory:
+            watcher = MODULE.LinuxInotifyWatcher.__new__(MODULE.LinuxInotifyWatcher)
+            root = Path(directory)
+            watcher.paths = [root]
+            watcher._roots = (root,)
+            watcher.fd = 123
+            watcher.watches = {}
+            watcher._errors = []
+            watcher._last_event_at = None
+            watcher._event_count = watcher._overflow_count = watcher._permission_denied = 0
+            watcher._closed = False
+            watcher._libc = None
+            watcher._fallback = None
+            payload = struct.pack("iIII", -1, MODULE.LinuxInotifyWatcher.IN_Q_OVERFLOW, 0, 0)
+            with patch.object(MODULE.select, "select", return_value=([123], [], [])), patch.object(MODULE.os, "read", return_value=payload), patch.object(watcher, "_register_tree") as register:
+                self.assertEqual(watcher.poll(), [])
+            self.assertEqual(watcher.health["status"], "degraded")
+            self.assertEqual(watcher.health["overflowCount"], 1)
+            register.assert_called_once_with(root)
+
+    def test_inotify_missing_root_exposes_health_and_polling_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "does-not-exist"
+            with patch.object(MODULE.platform, "system", return_value="Linux"):
+                watcher = MODULE.LinuxInotifyWatcher([missing])
+            try:
+                health = watcher.health
+                self.assertEqual(health["status"], "degraded")
+                self.assertFalse(health["active"])
+                self.assertTrue(health["errors"])
+                self.assertEqual(health["fallback"]["mode"], "linux-polling")
+            finally:
+                watcher.close()
+
+    def test_inotify_init_failure_keeps_polling_fallback_live(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(MODULE.platform, "system", return_value="Linux"), \
+                 patch.object(MODULE.ctypes, "CDLL", side_effect=OSError("inotify unavailable")):
+                watcher = MODULE.LinuxInotifyWatcher([root])
+            try:
+                self.assertFalse(watcher.health["active"])
+                self.assertEqual(watcher.health["fallback"]["mode"], "linux-polling")
+                created = root / "after-init.txt"
+                created.write_text("ok", encoding="utf-8")
+                events = watcher.poll()
+                self.assertEqual([event.action for event in events], ["create"])
+            finally:
+                watcher.close()
 
 
 if __name__ == "__main__":

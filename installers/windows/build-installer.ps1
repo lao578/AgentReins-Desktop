@@ -73,9 +73,19 @@ if ($SigningCertificate) {
     if (Test-Path -LiteralPath $etwHelper -PathType Leaf) { Sign-Artifact $etwHelper $signTool }
 }
 
-# Hash after signing so sidecars describe the exact bytes distributed.
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
-Set-Content -LiteralPath "$exe.sha256" -Value "$hash  AgentReins.exe" -Encoding ascii
+# Hash after signing so sidecars describe the exact bytes distributed.  Keep
+# sidecars for every executable shipped by the installer, not just the GUI;
+# this makes offline verification and support bundles deterministic.
+function Write-Sha256Sidecar([string]$Path) {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $name = Split-Path -Leaf $Path
+        $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath "$Path.sha256" -Value "$digest  $name" -Encoding ascii
+    }
+}
+Write-Sha256Sidecar $exe
+Write-Sha256Sidecar $nativeHost
+Write-Sha256Sidecar $etwHelper
 
 if (-not $InnoCompiler) {
     $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue

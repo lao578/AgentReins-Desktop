@@ -6,10 +6,11 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/lib/agentreins/agentreins-portable watch --interval 2
+ExecStart=%h/.local/lib/agentreins/agentreins-portable watch --interval 2 --output %h/.local/share/AgentReins/evidence.jsonl --database %h/.local/share/AgentReins/evidence.sqlite3
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+UMask=0077
 
 [Install]
 WantedBy=default.target

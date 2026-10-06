@@ -113,7 +113,10 @@ class WebEvidenceReader:
     def __init__(self, path: Path):
         self.path = path
         self.offset = 0
-        self._fingerprint: tuple[int, int] | None = None
+        # Include change time in addition to inode/size. Some Linux filesystems
+        # reuse an inode immediately after rotation; inode+size alone would
+        # then miss a replacement whose byte length happens to be unchanged.
+        self._fingerprint: tuple[int, int, int, int] | None = None
 
     def poll(self) -> list[dict[str, object]]:
         try:
@@ -493,32 +496,125 @@ class LinuxInotifyWatcher:
     MASK = 0x00000100 | 0x00000200 | 0x00000040 | 0x00000080 | 0x00000004 | 0x00000002
     IN_ISDIR = 0x40000000
     IN_IGNORED = 0x00008000
+    IN_Q_OVERFLOW = 0x00004000
+    IN_UNMOUNT = 0x00002000
 
     def __init__(self, paths: Iterable[Path]):
+        self.paths = [Path(path).expanduser() for path in paths]
         self.fd = -1
         self.watches: dict[int, Path] = {}
+        self._roots: tuple[Path, ...] = tuple(self.paths)
+        self._errors: list[dict[str, object]] = []
+        self._last_event_at: Optional[str] = None
+        self._event_count = 0
+        self._overflow_count = 0
+        self._permission_denied = 0
+        self._closed = False
+        self._libc = None
+        self._fallback = None
         if platform.system().lower() != "linux":
+            self._error("unsupported-platform", detail=platform.system())
+            self._fallback = PollingFileWatcher(self.paths, source="polling-fallback")
             return
         try:
             libc = ctypes.CDLL(None, use_errno=True)
             self.fd = int(libc.inotify_init1(os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)))
             if self.fd < 0:
+                self._error("inotify-init", errno_value=ctypes.get_errno())
                 self.fd = -1
-                return
-            self._libc = libc
-            for path in paths:
-                directory = path if path.is_dir() else path.parent
-                if directory.exists():
-                    self._register_tree(directory)
-        except (OSError, AttributeError):
+            else:
+                self._libc = libc
+                for path in self.paths:
+                    try:
+                        # A configured watch root is explicit. Do not silently
+                        # widen a missing path to its parent: that would report
+                        # unrelated files as if the requested root were active.
+                        # Polling fallback can still notice the root when it is
+                        # created later.
+                        if not path.exists():
+                            self._error("watch-root-not-found", path=path)
+                            continue
+                        directory = path if path.is_dir() else path.parent
+                        if not directory.exists():
+                            self._error("watch-root-not-found", path=directory)
+                        elif not os.access(directory, os.R_OK | os.X_OK):
+                            self._error("watch-root-permission-denied", path=directory)
+                        else:
+                            self._register_tree(directory)
+                    except OSError as error:
+                        self._error("watch-root-error", path=path, errno_value=getattr(error, "errno", None))
+                if not self.watches and self.paths:
+                    self._error("no-watches-registered")
+        except (OSError, AttributeError, TypeError) as error:
+            self._error("inotify-unavailable", detail=type(error).__name__, errno_value=getattr(error, "errno", None))
             self.close()
+        if self.fd < 0 or (self.paths and not self.watches):
+            # Keep collection useful when a container, mount, or endpoint
+            # policy denies inotify. The fallback is intentionally explicit
+            # in health rather than silently pretending inotify is active.
+            if self.fd >= 0 and self.paths and not self.watches:
+                try:
+                    os.close(self.fd)
+                except OSError:
+                    pass
+                self.fd = -1
+            self._fallback = PollingFileWatcher(self.paths, source="linux-polling")
+            # ``close()`` is also used while unwinding an inotify init error;
+            # once the polling fallback is installed the watcher remains a
+            # live collector rather than looking permanently closed.
+            self._closed = False
+
+    def _error(self, reason: str, *, path: Optional[Path] = None,
+               detail: Optional[str] = None, errno_value: Optional[int] = None) -> None:
+        item: dict[str, object] = {"reason": reason}
+        if path is not None:
+            item["path"] = str(path)
+        if detail:
+            item["detail"] = detail
+        if errno_value:
+            item["errno"] = int(errno_value)
+        # Avoid emitting one health row per event for a persistent problem.
+        if item not in self._errors:
+            self._errors.append(item)
+            del self._errors[:-32]
+        if "permission" in reason:
+            self._permission_denied += 1
+
+    @property
+    def health(self) -> dict[str, object]:
+        if self._closed and not self._errors:
+            status = "closed"
+        elif self.fd < 0:
+            status = "degraded"
+        elif self._errors or self._overflow_count:
+            status = "degraded"
+        else:
+            status = "healthy"
+        return {
+            "mode": "linux-inotify",
+            "status": status,
+            "active": self.fd >= 0 and not self._closed,
+            "watchCount": len(self.watches),
+            "eventCount": self._event_count,
+            "overflowCount": self._overflow_count,
+            "permissionDenied": self._permission_denied,
+            "lastEventAt": self._last_event_at,
+            "errors": list(self._errors),
+            "fallback": self._fallback.health if self._fallback is not None else None,
+        }
 
     def _add_watch(self, directory: Path) -> None:
         if self.fd < 0 or not directory.is_dir():
             return
         try:
             wd = int(self._libc.inotify_add_watch(self.fd, os.fsencode(str(directory)), self.MASK))
-        except OSError:
+        except OSError as error:
+            self._error("watch-add-error", path=directory, errno_value=getattr(error, "errno", None))
+            return
+        if wd < 0:
+            errno_value = ctypes.get_errno()
+            reason = "watch-add-permission-denied" if errno_value in {1, 13} else "watch-add-error"
+            self._error(reason, path=directory, errno_value=errno_value)
             return
         if wd >= 0:
             self.watches[wd] = directory
@@ -526,32 +622,64 @@ class LinuxInotifyWatcher:
     def _register_tree(self, root: Path) -> None:
         self._add_watch(root)
         try:
-            for directory, subdirs, _files in os.walk(root):
+            def onerror(error: OSError) -> None:
+                self._error("watch-tree-error", path=Path(getattr(error, "filename", None) or root),
+                            errno_value=getattr(error, "errno", None), detail=type(error).__name__)
+            for directory, subdirs, _files in os.walk(root, onerror=onerror):
                 # Do not follow symlinked directories: they can escape the
                 # requested watch root or create an unbounded traversal.
                 subdirs[:] = [name for name in subdirs if not (Path(directory) / name).is_symlink()]
                 for name in subdirs:
                     self._add_watch(Path(directory) / name)
-        except OSError:
+        except OSError as error:
+            self._error("watch-tree-error", path=root, errno_value=getattr(error, "errno", None))
             return
 
     def poll(self, timeout: float = 0.0) -> list[FileChangeRecord]:
-        if self.fd < 0:
+        if self._closed:
             return []
-        ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
+        if self.fd < 0:
+            return self._fallback.poll() if self._fallback is not None else []
+        try:
+            ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
+        except (OSError, ValueError) as error:
+            self._error("inotify-select-error", detail=type(error).__name__, errno_value=getattr(error, "errno", None))
+            return []
         if not ready:
             return []
         try:
             data = os.read(self.fd, 1024 * 1024)
         except BlockingIOError:
             return []
+        except OSError as error:
+            self._error("inotify-read-error", detail=type(error).__name__, errno_value=getattr(error, "errno", None))
+            return []
         events: list[FileChangeRecord] = []
         offset = 0
         while offset + 16 <= len(data):
             wd, mask, _, length = struct.unpack_from("iIII", data, offset)
             offset += 16
+            if offset + length > len(data):
+                self._error("inotify-truncated-record")
+                break
             raw_name = data[offset:offset + length].split(b"\0", 1)[0]
             offset += length
+            if mask & self.IN_Q_OVERFLOW:
+                self._overflow_count += 1
+                self._error("inotify-queue-overflow", detail="kernel queue overflow; subtree was re-registered")
+                # A queue overflow invalidates assumptions about the event
+                # stream. Re-registering the configured roots provides a
+                # deterministic recovery point; callers can inspect health to
+                # decide whether a full rescan is required.
+                for root in self._roots:
+                    directory = root if root.is_dir() else root.parent
+                    if directory.exists():
+                        self._register_tree(directory)
+                if self._fallback is None:
+                    self._fallback = PollingFileWatcher(self.paths, source="linux-polling")
+                else:
+                    events.extend(self._fallback.poll())
+                continue
             directory = self.watches.get(wd)
             if directory is None:
                 continue
@@ -559,6 +687,10 @@ class LinuxInotifyWatcher:
             path = directory / name if name else directory
             is_directory = bool(mask & self.IN_ISDIR)
             if mask & self.IN_IGNORED:
+                self.watches.pop(wd, None)
+                continue
+            if mask & self.IN_UNMOUNT:
+                self._error("inotify-unmount", path=directory)
                 self.watches.pop(wd, None)
                 continue
             # New directories do not inherit a parent's watch. Register them
@@ -573,6 +705,8 @@ class LinuxInotifyWatcher:
             elif mask & 0x00000040: action = "rename_from"
             elif mask & 0x00000080: action = "rename_to"
             events.append(FileChangeRecord(str(path), action, "linux-inotify", utc_now(), is_directory))
+            self._event_count += 1
+            self._last_event_at = events[-1].timestamp
         return events
 
     def close(self) -> None:
@@ -580,25 +714,72 @@ class LinuxInotifyWatcher:
             try: os.close(self.fd)
             except OSError: pass
             self.fd = -1
+        self._closed = True
+        if self._fallback is not None:
+            self._fallback.close()
 
 
 class PollingFileWatcher:
     """Portable fallback; Windows can replace this with ETW when available."""
 
-    def __init__(self, paths: Iterable[Path]):
+    def __init__(self, paths: Iterable[Path], source: str = "windows-polling"):
         self.paths = [Path(path).expanduser() for path in paths]
+        self.source = str(source)
         self.state: dict[str, tuple[int, int]] = {}
+        self._errors: list[dict[str, object]] = []
+        self._event_count = 0
+        self._last_event_at: Optional[str] = None
+        self._closed = False
         self._prime()
+
+    def _error(self, reason: str, path: Optional[Path] = None,
+               detail: Optional[str] = None) -> None:
+        item: dict[str, object] = {"reason": reason}
+        if path is not None:
+            item["path"] = str(path)
+        if detail:
+            item["detail"] = detail
+        if item not in self._errors:
+            self._errors.append(item)
+            del self._errors[:-32]
+
+    @property
+    def health(self) -> dict[str, object]:
+        return {
+            "mode": self.source,
+            "status": "closed" if self._closed else ("degraded" if self._errors else "healthy"),
+            "active": not self._closed,
+            "eventCount": self._event_count,
+            "lastEventAt": self._last_event_at,
+            "watchedFileCount": len(self.state),
+            "errors": list(self._errors),
+        }
 
     def _files(self) -> Iterable[Path]:
         for root in self.paths:
-            if root.is_file():
-                yield root
-            elif root.is_dir():
-                try:
-                    yield from (item for item in root.rglob("*") if item.is_file() and item.name not in INTERNAL_EVIDENCE_NAMES)
-                except OSError:
-                    continue
+            try:
+                if root.is_file():
+                    if root.name not in INTERNAL_EVIDENCE_NAMES:
+                        yield root
+                elif root.is_dir():
+                    # os.walk lets us report permission failures while still
+                    # collecting all readable siblings.
+                    def onerror(error: OSError) -> None:
+                        self._error("walk-error", Path(getattr(error, "filename", None) or root), type(error).__name__)
+                    for directory, _subdirs, filenames in os.walk(root, onerror=onerror):
+                        for name in filenames:
+                            if name in INTERNAL_EVIDENCE_NAMES:
+                                continue
+                            path = Path(directory) / name
+                            try:
+                                if path.is_file():
+                                    yield path
+                            except OSError as error:
+                                self._error("file-stat-error", path, type(error).__name__)
+                else:
+                    self._error("watch-root-not-found", root)
+            except OSError as error:
+                self._error("watch-root-error", root, type(error).__name__)
 
     @staticmethod
     def _signature(path: Path) -> tuple[int, int]:
@@ -612,20 +793,25 @@ class PollingFileWatcher:
         self.state = {str(path): self._signature(path) for path in self._files()}
 
     def poll(self) -> list[FileChangeRecord]:
+        if self._closed:
+            return []
         current = {str(path): self._signature(path) for path in self._files()}
         events: list[FileChangeRecord] = []
         for path in current.keys() - self.state.keys():
-            events.append(FileChangeRecord(path, "create", "windows-polling", utc_now()))
+            events.append(FileChangeRecord(path, "create", self.source, utc_now()))
         for path in self.state.keys() - current.keys():
-            events.append(FileChangeRecord(path, "delete", "windows-polling", utc_now()))
+            events.append(FileChangeRecord(path, "delete", self.source, utc_now()))
         for path in current.keys() & self.state.keys():
             if current[path] != self.state[path]:
-                events.append(FileChangeRecord(path, "modify", "windows-polling", utc_now()))
+                events.append(FileChangeRecord(path, "modify", self.source, utc_now()))
         self.state = current
+        if events:
+            self._event_count += len(events)
+            self._last_event_at = events[-1].timestamp
         return events
 
     def close(self) -> None:
-        return None
+        self._closed = True
 
 
 class EtwJsonlWatcher:
@@ -644,34 +830,126 @@ class EtwJsonlWatcher:
         self._fingerprint: tuple[int, int] | None = None
         self._active_until = 0.0
         self.roots: tuple[Path, ...] = ()
+        self._errors: list[dict[str, object]] = []
+        self._last_status: Optional[str] = None
+        self._last_heartbeat_at: Optional[str] = None
+        self._last_event_at: Optional[str] = None
+        self._event_count = 0
+        self._malformed_count = 0
+        self._rotation_count = 0
+        self._read_count = 0
+        self._missing_count = 0
+
+    def _error(self, reason: str, detail: Optional[str] = None) -> None:
+        item: dict[str, object] = {"reason": reason}
+        if detail:
+            item["detail"] = detail
+        if item not in self._errors:
+            self._errors.append(item)
+            del self._errors[:-32]
+
+    @property
+    def heartbeat_expired(self) -> bool:
+        return self._last_status in {"started", "heartbeat"} and not self.active
 
     @property
     def active(self) -> bool:
         return time.monotonic() < self._active_until
 
+    @property
+    def health(self) -> dict[str, object]:
+        if self.heartbeat_expired:
+            status = "degraded"
+            errors = [*self._errors, {"reason": "heartbeat-timeout", "ttlSeconds": self.HEARTBEAT_TTL_SECONDS}]
+        elif self._last_status == "error":
+            status = "degraded"
+            errors = list(self._errors)
+        elif self._errors:
+            status = "degraded"
+            errors = list(self._errors)
+        elif self.active:
+            status = "healthy"
+            errors = []
+        else:
+            status = "inactive"
+            errors = list(self._errors)
+        return {
+            "mode": "windows-etw",
+            "status": status,
+            "active": self.active,
+            "heartbeatExpired": self.heartbeat_expired,
+            "lastStatus": self._last_status,
+            "lastHeartbeatAt": self._last_heartbeat_at,
+            "lastEventAt": self._last_event_at,
+            "eventCount": self._event_count,
+            "malformedCount": self._malformed_count,
+            "rotationCount": self._rotation_count,
+            "readCount": self._read_count,
+            "missingCount": self._missing_count,
+            "offset": self.offset,
+            "errors": errors[-32:],
+        }
+
     def poll(self) -> list[FileChangeRecord]:
         try:
             stat = self.path.stat()
-        except OSError:
+        except OSError as error:
+            self._missing_count += 1
+            if self._missing_count == 1:
+                reason = "event-log-permission-denied" if getattr(error, "errno", None) in {5, 13} else "event-log-missing"
+                self._error(reason, str(self.path))
+            # Do not keep trusting a helper whose output disappeared. This
+            # immediately activates the polling fallback; a subsequent
+            # heartbeat/status line can re-enable ETW once the file returns.
+            self._active_until = 0.0
             return []
-        fingerprint = (int(getattr(stat, "st_ino", 0)), int(stat.st_size))
-        if self._fingerprint and (fingerprint[0] != self._fingerprint[0] or fingerprint[1] < self.offset):
+        self._missing_count = 0
+        fingerprint = (int(getattr(stat, "st_ino", 0)), int(stat.st_size),
+                       int(getattr(stat, "st_mtime_ns", 0)),
+                       int(getattr(stat, "st_ctime_ns", 0)))
+        if self._fingerprint and (
+            fingerprint[0] != self._fingerprint[0]
+            or fingerprint[1] < self.offset
+            or (fingerprint[1] == self._fingerprint[1]
+                and fingerprint[1] <= self.offset
+                and fingerprint[2:] != self._fingerprint[2:])
+        ):
             self.offset = 0
+            self._rotation_count += 1
+            self._error("event-log-rotated")
         self._fingerprint = fingerprint
         records: list[FileChangeRecord] = []
         try:
             with self.path.open("rb") as handle:
                 handle.seek(self.offset)
-                for raw in handle:
-                    self.offset += len(raw)
+                chunk = handle.read()
+                self._read_count += 1
+                lines = chunk.splitlines(keepends=True)
+                complete = 0
+                if lines and not lines[-1].endswith((b"\n", b"\r")):
+                    # ETW helper writes complete lines, but a process crash or
+                    # external rotation can leave a partial final row. Keep it
+                    # for the next poll rather than permanently skipping it.
+                    lines.pop()
+                for raw in lines:
+                    complete += len(raw)
                     try:
                         value = json.loads(raw.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
+                        self._malformed_count += 1
+                        self._error("malformed-event-row")
                         continue
                     if not isinstance(value, dict):
+                        self._malformed_count += 1
+                        self._error("non-object-event-row")
                         continue
                     if value.get("recordType") == "status" and value.get("source") == "windows-etw":
                         status = str(value.get("status", ""))
+                        self._last_status = status or None
+                        if status in {"started", "heartbeat"}:
+                            self._last_heartbeat_at = str(value.get("timestamp") or utc_now())
+                        elif status in {"overflow", "dropped", "queue-overflow"}:
+                            self._error("helper-queue-overflow", str(value.get("detail") or "event queue overflow"))
                         roots = value.get("roots")
                         if isinstance(roots, list):
                             self.roots = tuple(Path(str(root)) for root in roots if str(root))
@@ -679,6 +957,8 @@ class EtwJsonlWatcher:
                             self._active_until = time.monotonic() + self.HEARTBEAT_TTL_SECONDS
                         elif status in {"stopped", "error"}:
                             self._active_until = 0.0
+                            if status == "error":
+                                self._error("helper-error", str(value.get("detail") or "unknown"))
                         continue
                     if value.get("recordType") != "file_event" or value.get("source") != "windows-etw":
                         continue
@@ -696,7 +976,11 @@ class EtwJsonlWatcher:
                         is_directory=bool(value.get("isDirectory", False)),
                         details=details,
                     ))
+                    self._event_count += 1
+                    self._last_event_at = records[-1].timestamp
+                self.offset += complete
         except OSError:
+            self._error("event-log-read-error")
             return records
         return records
 
@@ -713,8 +997,11 @@ class WindowsEtwWatcher:
         self.etw = EtwJsonlWatcher(event_path)
         self._configured_roots: tuple[str, ...] = ()
         self._was_active = False
+        self._closed = False
 
     def poll(self) -> list[FileChangeRecord]:
+        if self._closed:
+            return []
         events = self.etw.poll()
         roots = tuple(str(path) for path in self.etw.roots)
         if roots and roots != self._configured_roots:
@@ -739,7 +1026,33 @@ class WindowsEtwWatcher:
     def mode(self) -> str:
         return "windows-etw" if self.etw.active else "windows-polling"
 
+    @property
+    def health(self) -> dict[str, object]:
+        if self._closed:
+            return {"mode": self.mode, "status": "closed", "active": False,
+                    "etw": self.etw.health, "fallback": self.polling.health,
+                    "configuredRoots": list(self._configured_roots)}
+        etw = self.etw.health
+        fallback = self.polling.health
+        if etw["status"] == "healthy":
+            status = "healthy"
+        elif etw.get("heartbeatExpired") or etw.get("lastStatus") == "error":
+            status = "degraded"
+        else:
+            # ETW is opt-in; an inactive helper with a healthy fallback is an
+            # expected state, not an error.
+            status = "healthy" if fallback.get("status") == "healthy" else "degraded"
+        return {
+            "mode": self.mode,
+            "status": status,
+            "active": bool(etw.get("active")),
+            "etw": etw,
+            "fallback": fallback,
+            "configuredRoots": list(self._configured_roots),
+        }
+
     def close(self) -> None:
+        self._closed = True
         self.etw.close()
         self.polling.close()
 
@@ -1107,6 +1420,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             started = time.monotonic()
             record = snapshot()
             file_events = file_watcher.poll()
+            watcher_health = getattr(file_watcher, "health", None)
+            if isinstance(watcher_health, dict):
+                record.setdefault("collectorHealth", {})["fileWatcher"] = watcher_health
+                if watcher_health.get("status") in {"degraded", "closed"}:
+                    record["collectorHealth"]["status"] = "degraded"
             web_events = web_reader.poll()
             native_events = native_reader.poll()
             record["fileEvents"] = [asdict(event) for event in file_events]
@@ -1114,6 +1432,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             record["nativeEvents"] = native_events
             if isinstance(file_watcher, WindowsEtwWatcher):
                 record["fileWatcher"] = file_watcher.mode
+            elif isinstance(file_watcher, LinuxInotifyWatcher):
+                record["fileWatcher"] = "linux-inotify" if file_watcher.fd >= 0 else "linux-polling"
+            elif isinstance(file_watcher, PollingFileWatcher):
+                record["fileWatcher"] = file_watcher.source
+            watcher_health = getattr(file_watcher, "health", None)
+            if callable(watcher_health):
+                watcher_health = watcher_health()
+            if isinstance(watcher_health, dict):
+                record["fileWatcherHealth"] = watcher_health
+                collector_health = record.setdefault("collectorHealth", {})
+                collector_health["fileWatcher"] = watcher_health
+                if watcher_health.get("status") == "degraded":
+                    collector_health["status"] = "degraded"
+                    errors = collector_health.setdefault("errors", [])
+                    if isinstance(errors, list):
+                        item = {"collector": "file-watcher", "errors": watcher_health.get("errors", [])}
+                        if item not in errors:
+                            errors.append(item)
             write_snapshot(record, args.output)
             store.append_web_events([*web_events, *native_events])
             store.append_snapshot(record)

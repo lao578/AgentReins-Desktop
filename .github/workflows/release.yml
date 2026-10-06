@@ -108,6 +108,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Tags containing a hyphen (for example v0.2.0-alpha) are
+          # prereleases. Keep the same workflow for stable tags while making
+          # the channel explicit to GitHub users and API consumers.
+          prerelease_args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+          fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" \
               AgentReins-*-macOS-universal.zip \
@@ -118,5 +125,6 @@ jobs:
               AgentReins-*-macOS-universal.zip.sha256 \
               --verify-tag \
               --notes-file CHANGELOG.md \
-              --title "AgentReins $GITHUB_REF_NAME"
+              --title "AgentReins $GITHUB_REF_NAME" \
+              "${prerelease_args[@]}"
           fi

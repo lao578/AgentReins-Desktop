@@ -97,6 +97,27 @@ class RuntimeHistoryTests(unittest.TestCase):
         reloaded["memory"]["inventory"].clear()
         self.assertTrue(runtime.view()["memory"]["inventory"])
 
+    def test_ui_mutation_actions_expose_preview_rule_edit_delete_and_undo(self):
+        path = self.root / "memory.md"
+        path.write_text("keep\ntoken: 'abcdefghijklmnop'\nlast\n", encoding="utf-8")
+        runtime = OperationsRuntime(self.database)
+        rule = runtime.run_action("protect", path=path)
+        self.assertFalse(runtime.run_action("protection-preview", rule_id=rule["id"])["changed"])
+        updated = runtime.run_action("protection-update", rule_id=rule["id"], auto_restore=True, operations=["modify"])
+        self.assertTrue(updated["autoRestore"])
+        self.assertEqual(["modify"], updated["operations"])
+        report = runtime.run_action("scan-memory", targets=[path])
+        finding = report["findings"][0]
+        deleted = runtime.run_action("delete-memory-line", finding=finding)
+        self.assertEqual("line-deleted", deleted["action"])
+        self.assertEqual("keep\nlast\n", path.read_text(encoding="utf-8"))
+        restored = runtime.run_action("memory-undo", path=str(path))
+        self.assertEqual("restored", restored["action"])
+        self.assertIn("abcdefghijklmnop", path.read_text(encoding="utf-8"))
+        settings = runtime.run_action("memory-configure", targets=[path], auto_scan=True, interval_seconds=120)
+        self.assertTrue(settings["autoScan"])
+        self.assertEqual([str(path)], settings["targets"])
+
     def test_incremental_observations_are_not_lost_by_competing_view_calls(self):
         runtime = OperationsRuntime(self.database)
         def observe(index):

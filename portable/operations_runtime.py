@@ -119,6 +119,18 @@ class OperationsRuntime:
         while len(self._security) > 2000:
             self._security.pop(next(iter(self._security)))
 
+    def _refresh_memory(self) -> dict[str, Any]:
+        """Rescan the same explicit targets used by the last memory scan.
+
+        Mutation actions must not unexpectedly fall back to the user's default
+        home-directory targets.  Keeping the target set also makes the desktop
+        finding actions deterministic when a user scans one selected folder.
+        """
+        with self._lock:
+            previous = self._memory.get("targets") if isinstance(self._memory, dict) else None
+        targets = [Path(value) for value in previous] if isinstance(previous, list) and previous else None
+        return self.memory.scan(targets=targets)
+
     def observe(self, record: dict[str, Any]) -> dict[str, Any]:
         with self._observe_lock:
             self._load_history()
@@ -155,6 +167,7 @@ class OperationsRuntime:
             projection["protectedFiles"] = protected_files
             projection["protectionEvents"] = list(self._protection_events)
             projection["memory"] = copy.deepcopy(self._memory)
+            projection["memorySettings"] = self.memory.get_settings()
             projection["generatedCode"] = [finding for value in self._security.values() for finding in value.get("codeFindings", [])][-500:]
             projection["externalContent"] = [finding for value in self._security.values() for finding in value.get("externalContent", [])][-300:]
             projection["analyses"] = copy.deepcopy(self._analyses)
@@ -201,6 +214,13 @@ class OperationsRuntime:
             return self.protection.add_rule(Path(arguments["path"]), auto_restore=arguments.get("auto_restore", False))
         if action == "protection-list":
             return self.protection.list_rules()
+        if action == "protection-preview":
+            return self.protection.preview(arguments["rule_id"])
+        if action == "protection-update":
+            operations = arguments.get("operations")
+            return self.protection.update_rule(arguments["rule_id"],
+                                               auto_restore=arguments.get("auto_restore"),
+                                               operations=operations)
         if action == "unprotect":
             self.protection.remove_rule(arguments["rule_id"])
             return {"removed": arguments["rule_id"]}
@@ -215,12 +235,50 @@ class OperationsRuntime:
                     self._memory = result
                 self._state_write("memory", result)
             return result
+        if action == "memory-settings":
+            return self.memory.get_settings()
+        if action == "memory-configure":
+            return self.memory.configure(targets=arguments.get("targets"),
+                                         rules=arguments.get("rules"),
+                                         auto_scan=arguments.get("auto_scan"),
+                                         interval_seconds=arguments.get("interval_seconds"))
         if action == "redact-memory":
             with self._memory_lock:
-                return self.memory.redact_finding(arguments["finding"])
+                result = self.memory.redact_finding(arguments["finding"])
+                refreshed = self._refresh_memory()
+                with self._lock:
+                    self._memory = refreshed
+                self._state_write("memory", refreshed)
+                return result
+        if action == "delete-memory-line":
+            with self._memory_lock:
+                result = self.memory.delete_line(arguments["finding"])
+                refreshed = self._refresh_memory()
+                with self._lock:
+                    self._memory = refreshed
+                self._state_write("memory", refreshed)
+                return result
+        if action == "edit-memory":
+            with self._memory_lock:
+                result = self.memory.edit_file(Path(arguments["path"]), str(arguments.get("content", "")),
+                                                str(arguments["expected_fingerprint"]))
+                refreshed = self._refresh_memory()
+                with self._lock:
+                    self._memory = refreshed
+                self._state_write("memory", refreshed)
+                return result
+        if action == "memory-undo":
+            # Alias kept explicit for headless clients and UI automation; the
+            # safety store's guarded restore is the actual undo operation.
+            action = "restore-memory"
         if action == "restore-memory":
             with self._memory_lock:
-                return self.memory.restore(Path(arguments["path"]))
+                result = self.memory.restore(Path(arguments["path"]), arguments.get("expected_fingerprint"))
+                refreshed = self._refresh_memory()
+                with self._lock:
+                    self._memory = refreshed
+                self._state_write("memory", refreshed)
+                return result
         if action == "configure-analysis":
             with self._analysis_lock:
                 return self.analysis.configure(arguments["base_url"], arguments["model"], arguments.get("key_env", "AGENTREINS_ANALYSIS_API_KEY"))

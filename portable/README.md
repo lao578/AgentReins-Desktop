@@ -26,6 +26,15 @@ polling fallback. An optional elevated ETW helper can be enabled explicitly
 with `watch --etw`; if its JSONL heartbeat expires, polling continues
 automatically. ETW is never started implicitly.
 
+Each `watch` snapshot includes `fileWatcherHealth` and the same object under
+`collectorHealth.fileWatcher`. It reports the active mode, watch/event counts,
+permission or root errors, ETW heartbeat expiry, malformed rows, log rotation,
+and Linux inotify queue overflow. An inotify overflow causes the configured
+subtree to be re-registered and marks the sample `degraded`; the polling
+fallback remains available so collection does not silently stop. ETW JSONL
+partial final rows are retained for the next poll and rotated files reset the
+cursor without losing the new generation's first complete row.
+
 ## Native Agent sessions
 
 The portable watcher also has best-effort, read-only adapters for local
@@ -115,13 +124,13 @@ After installing the Debian package, the collector can run as a per-user
 systemd service (no root access is needed for collection):
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now agentreins.service
+agentreins-install-service
 systemctl --user status agentreins.service
 ```
 
 The service writes to `~/.local/share/AgentReins/evidence.jsonl`; disable it
-with `systemctl --user disable --now agentreins.service`. The AppImage build
+with `agentreins-uninstall-service` (or `systemctl --user disable --now
+agentreins.service`). The AppImage build
 uses `appimagetool` from `PATH`, or downloads the matching tool into
 `build/linux-package/` when running in CI. Set `APPIMAGETOOL=/path/to/tool` to
 use a pinned local copy.

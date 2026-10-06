@@ -195,6 +195,9 @@ contains the same host and installer under its mounted `usr/` tree; extracting
 the AppImage and running `usr/bin/agentreins-install-native-host` registers it
 for the current user. Remove the manifests with
 `agentreins-uninstall-native-host` (or the matching script in the AppImage).
+The Debian package also provides `agentreins-install-service` and
+`agentreins-uninstall-service`; the service writes JSONL and SQLite evidence
+with a private (`0700`/`0600`) umask and is never enabled implicitly.
 
 Tagged releases also publish Linux packages: an x86_64 AppImage and an
 amd64 `.deb`. Build them locally with `./portable/package-linux.sh all` after

@@ -53,6 +53,7 @@ Name: "autostart"; Description: "{cm:StartAtLogin}"; GroupDescription: "{cm:Star
 [Files]
 Source: "..\..\dist\AgentReins.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\BrowserExtension\manifest.json"; DestDir: "{app}\BrowserExtension"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\..\BrowserExtension\native-host.json"; DestDir: "{app}\BrowserExtension"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\..\BrowserExtension\service-worker.js"; DestDir: "{app}\BrowserExtension"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\..\BrowserExtension\web-agent-content.js"; DestDir: "{app}\BrowserExtension"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\..\BrowserExtension\install-native-host.ps1"; DestDir: "{app}\BrowserExtension"; Flags: ignoreversion skipifsourcedoesntexist

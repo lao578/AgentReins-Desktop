@@ -157,6 +157,18 @@ class AgentReinsDesktop(tk.Tk):
         "Security findings": "安全发现", "Turn journals": "任务日志", "Path": "路径", "Action": "操作", "Source": "来源",
         "Confidence": "可信度", "Timestamp": "时间", "Kind": "类型", "Title": "标题", "Summary": "摘要", "Provider": "提供方",
         "Tool": "工具", "Status": "状态", "Verification": "验证状态", "Risk": "风险", "Evidence": "证据", "No data": "暂无数据",
+        "Preview rule": "预览规则", "Edit rule": "编辑规则", "Delete line": "删除整行", "Edit finding file": "编辑文件",
+        "Undo last edit": "撤销上次编辑", "Memory settings": "记忆设置", "Select a finding, not an inventory row": "请选择敏感发现，而不是文件清单",
+        "Select a file first": "请先选择文件", "Rule preview": "规则预览", "Protection rule": "保护规则",
+        "Automatically restore this file after modification or deletion? Choose No for alerts only.": "文件修改或删除后自动恢复？选择“否”则仅告警。",
+        "Update protection rule": "更新保护规则", "Auto restore after changes?": "变更后自动恢复？",
+        "Operations (modify,delete)": "操作（modify,delete）", "Enter comma-separated operations (modify, delete):": "输入逗号分隔的操作（modify、delete）：",
+        "Scan targets (one path per line; blank keeps current):": "扫描目标（每行一个路径；留空保持当前）：",
+        "Automatic memory scanning": "自动扫描记忆", "Interval seconds (60-604800):": "扫描间隔秒数（60-604800）：",
+        "Save settings": "保存设置", "Memory file editor": "记忆文件编辑器", "Save memory file": "保存记忆文件",
+        "Memory file changed; scan again before editing": "记忆文件已变化，请重新扫描后再编辑", "Security source": "安全来源",
+        "Jump to source event": "跳转到来源事件", "Source event was not captured": "未捕获来源事件", "Source event": "来源事件",
+        "An operation is already running": "已有操作正在运行",
     }
 
     def _t(self, value: str, **format_values: Any) -> str:
@@ -346,8 +358,10 @@ class AgentReinsDesktop(tk.Tk):
         ttk.Entry(top, textvariable=query).grid(row=0, column=1, sticky="ew")
         self._text(ttk.Button(top, command=lambda q=query: q.set("")), "Clear").grid(row=0, column=2, padx=(6, 0))
         if key == "protected":
-            for index, (title, action) in enumerate((("Protect file", "protect"), ("Restore file", "restore-file"), ("Remove rule", "unprotect")), 3):
+            for index, (title, action) in enumerate((("Protect file", "protect"), ("Preview rule", "protection-preview"), ("Edit rule", "protection-update"), ("Restore file", "restore-file"), ("Remove rule", "unprotect")), 3):
                 self._text(ttk.Button(top, command=lambda a=action: self._run_operation(a)), title).grid(row=0, column=index, padx=(6, 0))
+        if key == "security":
+            self._text(ttk.Button(top, command=self._jump_security_source), "Jump to source event").grid(row=0, column=3, padx=(6, 0))
         tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
         tree.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
@@ -392,12 +406,69 @@ class AgentReinsDesktop(tk.Tk):
     def _build_memory_tab(self) -> None:
         self.memory_tab.columnconfigure(0, weight=1); self.memory_tab.rowconfigure(1, weight=1)
         top = ttk.Frame(self.memory_tab); top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        for title, action in (("Scan memory", "scan-memory"), ("Scan selected folder", "scan-memory-folder"), ("Redact selected", "redact-memory"), ("Restore memory", "restore-memory")):
+        for title, action in (("Scan memory", "scan-memory"), ("Scan selected folder", "scan-memory-folder"), ("Redact selected", "redact-memory"), ("Delete line", "delete-memory-line"), ("Edit finding file", "edit-memory"), ("Undo last edit", "memory-undo"), ("Restore memory", "restore-memory")):
             self._text(ttk.Button(top, command=lambda a=action: self._run_operation(a)), title).pack(side="left", padx=(0, 6))
+        self._text(ttk.Button(top, command=self._memory_settings_dialog), "Memory settings").pack(side="left", padx=(0, 6))
         table = ttk.Frame(self.memory_tab)
         table.grid(row=1, column=0, sticky="nsew")
         self._build_operation_table(table, "memory", ("path", "type", "line", "severity", "preview"), ("Path", "Kind", "Line", "Severity", "Evidence"))
         self._memory_output = self._operations_details["memory"]
+
+    def _memory_settings_dialog(self) -> None:
+        """Edit bounded memory scan settings without exposing credentials."""
+        current = (self._operations_view.get("memory") or {}).get("targets")
+        if not isinstance(current, list):
+            current = []
+        dialog = tk.Toplevel(self)
+        dialog.title(self._t("Memory settings")); dialog.transient(self); dialog.grab_set()
+        dialog.columnconfigure(0, weight=1); dialog.rowconfigure(1, weight=1)
+        self._text(ttk.Label(dialog), "Scan targets (one path per line; blank keeps current):").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        targets = tk.Text(dialog, width=80, height=8, wrap="none")
+        targets.grid(row=1, column=0, sticky="nsew", padx=12)
+        targets.insert("1.0", "\n".join(str(value) for value in current))
+        footer = ttk.Frame(dialog); footer.grid(row=2, column=0, sticky="ew", padx=12, pady=8)
+        settings = self._operations_view.get("memorySettings") or {}
+        auto = tk.BooleanVar(value=bool(settings.get("autoScan", False)))
+        self._text(ttk.Checkbutton(footer, variable=auto), "Automatic memory scanning").pack(side="left")
+        self._text(ttk.Label(footer), "Interval seconds (60-604800):").pack(side="left", padx=(12, 4))
+        interval = ttk.Entry(footer, width=10); interval.insert(0, str(settings.get("intervalSeconds", 86400))); interval.pack(side="left")
+        def save() -> None:
+            if self._action_busy:
+                dialog.destroy(); self.status_var.set(self._t("An operation is already running")); return
+            values = [line.strip() for line in targets.get("1.0", "end").splitlines() if line.strip()]
+            try:
+                seconds = int(interval.get().strip())
+            except ValueError:
+                messagebox.showerror(self._t("Memory settings"), self._t("Interval seconds (60-604800):"), parent=dialog); return
+            dialog.destroy()
+            args: dict[str, Any] = {"auto_scan": bool(auto.get()), "interval_seconds": seconds}
+            if values:
+                args["targets"] = values
+            self._dispatch_operation("memory-configure", args)
+        self._text(ttk.Button(footer, command=save), "Save settings").pack(side="right")
+        self._text(ttk.Button(footer, command=dialog.destroy), "Clear").pack(side="right", padx=(0, 6))
+
+    def _open_memory_editor(self, finding: dict[str, Any]) -> None:
+        path = Path(str(finding.get("path") or finding.get("src") or ""))
+        if finding.get("srcKind") != "file" or not finding.get("fingerprint") or not path.is_file():
+            self.status_var.set(self._t("Select a finding, not an inventory row")); return
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            messagebox.showerror(self._t("Memory file editor"), str(exc), parent=self); return
+        dialog = tk.Toplevel(self); dialog.title(self._t("Memory file editor") + ": " + str(path)); dialog.transient(self); dialog.grab_set()
+        dialog.columnconfigure(0, weight=1); dialog.rowconfigure(0, weight=1)
+        editor = tk.Text(dialog, width=100, height=24, wrap="none", undo=True); editor.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        editor.insert("1.0", content)
+        footer = ttk.Frame(dialog); footer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        def save() -> None:
+            if self._action_busy:
+                dialog.destroy(); self.status_var.set(self._t("An operation is already running")); return
+            value = editor.get("1.0", "end-1c")
+            dialog.destroy()
+            self._dispatch_operation("edit-memory", {"path": str(path), "content": value, "expected_fingerprint": finding["fingerprint"]})
+        self._text(ttk.Button(footer, command=save), "Save memory file").pack(side="right")
+        self._text(ttk.Button(footer, command=dialog.destroy), "Clear").pack(side="right", padx=(0, 6))
 
     def _navigate(self, _event: Any = None) -> None:
         selection = self._navigation.selection()
@@ -647,7 +718,45 @@ class AgentReinsDesktop(tk.Tk):
             evidence = {**row, "events": [event for event in self._operations_view.get("timeline", []) if event.get("sessionId") == row.get("sessionId") and event.get("provider") == row.get("provider")],
                         "context": [context for context in self._operations_view.get("contextReports", []) if context.get("sessionId") == row.get("sessionId") and context.get("provider") == row.get("provider")]}
             self._last_evidence_selection = evidence
+        elif key == "security":
+            source_events = []
+            raw_event_ids = row.get("eventIds") or []
+            if isinstance(raw_event_ids, str):
+                raw_event_ids = [raw_event_ids]
+            event_ids = set(str(value) for value in raw_event_ids)
+            if row.get("eventId"):
+                event_ids.add(str(row.get("eventId")))
+            for event in self._operations_view.get("timeline", []) or []:
+                if str(event.get("id")) in event_ids or str(event.get("eventId")) in event_ids:
+                    source_events.append(event)
+            evidence = {"finding": row, "sourceEvents": source_events,
+                        "sourceEventCount": len(source_events),
+                        "jumpHint": "Select 'Jump to source event' to open the first captured event."}
+            self._last_evidence_selection = evidence
         self._set_text_widget(self._operations_details[key], evidence)
+
+    def _jump_security_source(self) -> None:
+        selected = self._selected_operation("security")
+        if not selected:
+            self.status_var.set(self._t("No data")); return
+        raw_event_ids = selected.get("eventIds") or []
+        if isinstance(raw_event_ids, str):
+            raw_event_ids = [raw_event_ids]
+        event_ids = [str(value) for value in raw_event_ids]
+        if selected.get("eventId"):
+            event_ids.append(str(selected.get("eventId")))
+        timeline = self._operations_trees.get("timeline")
+        if timeline is None:
+            return
+        for item in timeline.get_children():
+            row = self._operations_rows.get("timeline", [])[int(item)]
+            if str(row.get("id")) in event_ids or str(row.get("eventId")) in event_ids:
+                timeline.selection_set(item); timeline.focus(item)
+                self.notebook.select(self._notebook_tabs[[title for _nb, _tab, title in self._notebook_tabs].index("Timeline")][1])
+                self._show_operation_detail("timeline")
+                self.status_var.set(self._t("Source event") + ": " + str(row.get("id")))
+                return
+        self.status_var.set(self._t("Source event was not captured"))
 
     def _populate_operations(self, value: dict[str, Any]) -> None:
         self._operations_view = value or {}
@@ -748,7 +857,7 @@ class AgentReinsDesktop(tk.Tk):
                 return
             auto = messagebox.askyesno(self._t("File protection"), self._t("Automatically restore this file after modification or deletion? Choose No for alerts only."))
             arguments = {"path": path, "auto_restore": auto}
-        elif action == "unprotect" or action == "restore-file":
+        elif action in {"unprotect", "restore-file", "protection-preview", "protection-update"}:
             selected = self._selected_operation("protected")
             if not selected:
                 self.status_var.set(self._t("Select a file first")); return
@@ -757,6 +866,17 @@ class AgentReinsDesktop(tk.Tk):
                 arguments["fingerprint"] = selected.get("lastFingerprint")
                 if not messagebox.askyesno(self._t("Restore file"), self._t("Restore the protected baseline for this file?") + "\n" + str(selected.get("path"))):
                     return
+            elif action == "protection-update":
+                auto = messagebox.askyesno(self._t("Update protection rule"), self._t("Auto restore after changes?"),
+                                            parent=self)
+                raw_operations = simpledialog.askstring(self._t("Update protection rule"),
+                                                        self._t("Enter comma-separated operations (modify, delete):"),
+                                                        initialvalue=", ".join(selected.get("operations") or ("modify", "delete")),
+                                                        parent=self)
+                if raw_operations is None:
+                    return
+                operations = [value.strip() for value in raw_operations.split(",") if value.strip()]
+                arguments.update({"auto_restore": auto, "operations": operations})
         elif action == "configure-analysis":
             arguments = {"base_url": self._analysis_url.get(), "model": self._analysis_model.get(), "key_env": "AGENTREINS_ANALYSIS_API_KEY"}
             if self._analysis_key.get():
@@ -775,20 +895,26 @@ class AgentReinsDesktop(tk.Tk):
                 return
             arguments = {"targets": [folder]}
             action = "scan-memory"
-        elif action == "redact-memory":
+        elif action in {"redact-memory", "delete-memory-line", "edit-memory", "memory-undo", "restore-memory"}:
             finding = self._selected_operation("memory")
             if not finding: self.status_var.set(self._t("No data")); return
-            if not finding.get("match"):
+            if action in {"redact-memory", "delete-memory-line", "edit-memory"} and not finding.get("match"):
                 self.status_var.set(self._t("Select a finding, not an inventory row")); return
-            if not messagebox.askyesno(self._t("Redact selected"), self._t("Back up the file and redact this finding?") + "\n" + str(finding.get("src", ""))):
-                return
-            arguments = {"finding": finding}
-        elif action == "restore-memory":
-            finding = self._selected_operation("memory")
-            if not finding: self.status_var.set(self._t("No data")); return
-            if not messagebox.askyesno(self._t("Restore memory"), self._t("Restore the last backed-up memory file?") + "\n" + str(finding.get("path", ""))):
-                return
-            arguments = {"path": finding.get("path", "")}
+            if action == "redact-memory":
+                if not messagebox.askyesno(self._t("Redact selected"), self._t("Back up the file and redact this finding?") + "\n" + str(finding.get("src", ""))):
+                    return
+                arguments = {"finding": finding}
+            elif action == "delete-memory-line":
+                if not messagebox.askyesno(self._t("Delete line"), self._t("Delete the entire line containing this finding?") + "\n" + str(finding.get("path", ""))):
+                    return
+                arguments = {"finding": finding}
+            elif action == "edit-memory":
+                self._open_memory_editor(finding); return
+            elif action in {"memory-undo", "restore-memory"}:
+                if not messagebox.askyesno(self._t("Restore memory"), self._t("Restore the last backed-up memory file?") + "\n" + str(finding.get("path", ""))):
+                    return
+                arguments = {"path": finding.get("path", "")}
+                action = "restore-memory"
         if action == "recover":
             action = "recovery-confirm"
         self._dispatch_operation(action, arguments)
@@ -1009,6 +1135,10 @@ class AgentReinsDesktop(tk.Tk):
                     self._populate_operations(view)
                     if action in {"begin", "finish", "verify", "recover", "recovery-preview", "verification-preview", "recovery-confirm"}:
                         self._set_text_widget(self._verify_output, result)
+                    if action.startswith("protection-"):
+                        self._set_text_widget(self._operations_details.get("protected", self._verify_output), result)
+                    if action in {"redact-memory", "delete-memory-line", "edit-memory", "restore-memory", "memory-undo", "memory-configure", "memory-settings"}:
+                        self._set_text_widget(self._memory_output, result)
                     if action == "analyze":
                         self._set_text_widget(self._analysis_output, result)
                     if action == "history":

@@ -24,6 +24,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 foreach ($browser in @(
     @{ Name = 'Google Chrome'; Key = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts' },
+    @{ Name = 'Chromium'; Key = 'HKCU:\Software\Chromium\NativeMessagingHosts' },
     @{ Name = 'Microsoft Edge'; Key = 'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts' }
 )) {
     $key = Join-Path $browser.Key 'com.agentspec.agentreins.web'
