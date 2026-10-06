@@ -186,14 +186,22 @@ or use the Windows Setup installer. Linux users can download the AppImage or
 `systemd --user` collector service.
 
 Use `watch --output <file>` for a durable stream. The native browser bridge is
-installed with `BrowserExtension/install-native-host.ps1` on Windows or
-`BrowserExtension/install-native-host-linux.sh` on Linux.
+installed with `BrowserExtension/install-native-host.ps1` on Windows. Linux
+source checkouts can run `BrowserExtension/install-native-host-linux.sh <path-to-AgentReinsNativeHost>`.
+Release `.deb` packages provide a matching
+`agentreins-install-native-host` command, which installs per-user Chrome,
+Chromium, and Microsoft Edge manifests without requiring root. The AppImage
+contains the same host and installer under its mounted `usr/` tree; extracting
+the AppImage and running `usr/bin/agentreins-install-native-host` registers it
+for the current user. Remove the manifests with
+`agentreins-uninstall-native-host` (or the matching script in the AppImage).
 
 Tagged releases also publish Linux packages: an x86_64 AppImage and an
 amd64 `.deb`. Build them locally with `./portable/package-linux.sh all` after
 installing `python3-tk`, `dpkg-dev`, and PyInstaller. The Debian package
-includes the `agentreins` GUI launcher, the `agentreins-portable` CLI, and an
-optional per-user `agentreins.service` (enable it with
+includes the `agentreins` GUI launcher, the `agentreins-portable` CLI, the
+Linux Native Messaging host, and an optional per-user `agentreins.service`
+(enable it with
 `systemctl --user enable --now agentreins.service`).
 
 ### Requirements

@@ -47,6 +47,7 @@ def main() -> int:
                                 "findings": [{"path": str(root / "memory.md"), "type": "OpenAI API Key", "severity": "high", "preview": "[REDACTED]"}], "errors": []},
                      "generatedCode": [],
                      "externalContent": [], "analyses": [], "collectorHealth": record["collectorHealth"]})
+        view["evidenceIntegrity"] = {"status": "healthy", "count": 3, "head": "smoke-head", "errors": []}
         with patch.object(desktop, "platform_paths", return_value=paths), \
              patch.object(desktop.AgentReinsDesktop, "_prepare_optional_tray", return_value=None):
             app = desktop.AgentReinsDesktop()
@@ -63,6 +64,8 @@ def main() -> int:
                 required = {"overview", "runtime", "sessions", "timeline", "tools", "security", "providers", "generated", "protected"}
                 assert required.issubset(app._operations_trees), f"Missing UI tables: {required - set(app._operations_trees)}"
                 assert app._operations_trees["sessions"].get_children(), "Session evidence did not render"
+                overview_values = [app._operations_trees["overview"].item(item, "values") for item in app._operations_trees["overview"].get_children()]
+                assert any("healthy" in [str(value).lower() for value in values] for values in overview_values), "Evidence integrity was not surfaced in overview"
                 session_values = app._operations_trees["sessions"].item(app._operations_trees["sessions"].get_children()[0], "values")
                 assert "smoke-session" in session_values, f"Session ID was not mapped to the Sessions row: {session_values}"
                 file_values = app._operations_trees["files"].item(app._operations_trees["files"].get_children()[0], "values")
@@ -97,6 +100,7 @@ def main() -> int:
                 app._journal_tree.selection_set(selected_journal)
                 app._select_journal()
                 assert app._journal_var.get() == "smoke-journal", "Verify/recover selection was not captured"
+                assert app._journal_tree.heading("verification", "text") == "Verification", "Journal verification column heading is ambiguous"
 
                 class FakeRuntime:
                     def __init__(self):

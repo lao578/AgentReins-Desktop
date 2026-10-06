@@ -81,6 +81,38 @@ class PortableRuntimeTests(unittest.TestCase):
         self.assertEqual(tools, [("browser.upload",)])
         self.assertEqual(links, 1)
 
+    def test_evidence_chain_reports_health_and_detects_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "evidence.sqlite3"
+            store = MODULE.EvidenceStore(database)
+            store.append_snapshot({
+                "schemaVersion": 2,
+                "timestamp": "2026-10-05T00:00:00Z",
+                "platform": "test",
+                "sourceCheckpoint": {"offset": 4, "inode": 9},
+                "processes": [], "connections": [], "agents": [],
+            })
+            store.append_web_events([{
+                "eventId": "chain-event", "eventType": "prompt",
+                "provider": "codex", "sessionId": "chain-session",
+                "timestamp": "2026-10-05T00:00:01Z", "sourceOffset": 12,
+            }])
+            healthy = store.integrity_report()
+            self.assertEqual(healthy["status"], "healthy")
+            self.assertEqual(healthy["count"], 2)
+            checkpoint = store.connection.execute("SELECT source_checkpoint FROM evidence_chain WHERE id=1").fetchone()[0]
+            self.assertEqual(json.loads(checkpoint)["offset"], 4)
+            store.connection.execute("UPDATE evidence_chain SET source_checkpoint='tampered' WHERE id=1")
+            store.connection.commit()
+            self.assertEqual(store.integrity_report()["status"], "degraded")
+            # Mutating the lossless source row is also detected, not just a
+            # changed chain envelope.
+            store.connection.execute("UPDATE snapshots SET payload='tampered' WHERE id=1")
+            store.connection.commit()
+            reasons = {item["reason"] for item in store.integrity_report()["errors"]}
+            self.assertIn("payload_hash_mismatch", reasons)
+            store.close()
+
     def test_optional_etw_jsonl_watcher_reads_events_and_tracks_heartbeat(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "etw-events.jsonl"

@@ -18,6 +18,7 @@ import argparse
 import csv
 import ctypes
 import datetime as dt
+import hashlib
 import json
 import os
 import platform
@@ -141,6 +142,75 @@ class WebEvidenceReader:
         return events
 
 
+def verify_evidence_chain(connection: sqlite3.Connection) -> dict[str, object]:
+    """Verify the append-only evidence envelope on an existing connection."""
+    try:
+        rows = connection.execute(
+            "SELECT id,evidence_kind,source_id,source,observed_at,payload_sha256,previous_hash,chain_hash,source_checkpoint FROM evidence_chain ORDER BY id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {"algorithm": "sha256-chain-v1", "status": "unavailable", "count": 0,
+                "head": None, "errors": [{"reason": "evidence_chain_missing"}],
+                "lastCheckpoint": None}
+    errors: list[dict[str, object]] = []
+    previous = "0" * 64
+    for row in rows:
+        (row_id, kind, source_id, source, observed_at, payload_hash,
+         previous_hash, chain_hash, checkpoint) = row
+        if str(previous_hash) != previous:
+            errors.append({"id": row_id, "reason": "previous_hash_mismatch"})
+        checkpoint_text = str(checkpoint or "")
+        material = "|".join((previous, str(kind), str(source_id), str(source),
+                              str(observed_at), str(payload_hash), checkpoint_text))
+        expected = hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+        if str(chain_hash) != expected:
+            errors.append({"id": row_id, "reason": "chain_hash_mismatch"})
+        # Validate the digest against the lossless payload table as well as
+        # the chain row.  Otherwise an editor could change a snapshot/event
+        # payload while leaving the envelope untouched.
+        table_query = {
+            "snapshot": ("SELECT payload FROM snapshots WHERE id=?", (source_id,)),
+            "web_event": ("SELECT payload FROM web_events WHERE event_id=?", (source_id,)),
+        }.get(str(kind))
+        current_payload: Optional[str] = None
+        if table_query is not None:
+            try:
+                payload_row = connection.execute(*table_query).fetchone()
+                current_payload = str(payload_row[0]) if payload_row else None
+            except sqlite3.OperationalError:
+                current_payload = None
+            if current_payload is None:
+                errors.append({"id": row_id, "reason": "source_payload_missing"})
+            elif hashlib.sha256(current_payload.encode("utf-8", "replace")).hexdigest() != str(payload_hash):
+                errors.append({"id": row_id, "reason": "payload_hash_mismatch"})
+        elif str(kind) == "file_event":
+            try:
+                payload_row = connection.execute(
+                    "SELECT timestamp,path,action,source,is_directory,details FROM file_events WHERE id=?",
+                    (source_id,),
+                ).fetchone()
+                if payload_row is None:
+                    errors.append({"id": row_id, "reason": "source_payload_missing"})
+                else:
+                    try:
+                        details = json.loads(payload_row[5] or "{}")
+                    except (TypeError, ValueError):
+                        details = {}
+                    current = json.dumps({"path": payload_row[1], "action": payload_row[2],
+                                          "source": payload_row[3], "timestamp": payload_row[0],
+                                          "is_directory": bool(payload_row[4]), "details": details},
+                                         ensure_ascii=True, sort_keys=True)
+                    if hashlib.sha256(current.encode("utf-8", "replace")).hexdigest() != str(payload_hash):
+                        errors.append({"id": row_id, "reason": "payload_hash_mismatch"})
+            except sqlite3.OperationalError:
+                errors.append({"id": row_id, "reason": "source_payload_missing"})
+        previous = str(chain_hash)
+    head = previous if rows else None
+    return {"algorithm": "sha256-chain-v1", "status": "degraded" if errors else "healthy" if rows else "empty",
+            "count": len(rows), "head": head, "errors": errors[:50],
+            "lastCheckpoint": rows[-1][8] if rows else None}
+
+
 class EvidenceStore:
     """Small WAL-backed evidence store shared by the CLI and desktop shell."""
 
@@ -209,15 +279,61 @@ class EvidenceStore:
                 created_at TEXT NOT NULL,
                 UNIQUE(source_kind, source_id, session_id, turn_id, tool_call_id)
             );
+            CREATE TABLE IF NOT EXISTS evidence_chain(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evidence_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                previous_hash TEXT NOT NULL,
+                chain_hash TEXT NOT NULL UNIQUE,
+                source_checkpoint TEXT,
+                UNIQUE(evidence_kind, source_id)
+            );
         """)
         self.connection.commit()
 
+    @staticmethod
+    def _payload_sha256(payload: str) -> str:
+        return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
+
+    def _append_chain(self, evidence_kind: str, source_id: str, source: str,
+                      observed_at: str, payload: str,
+                      checkpoint: object = None) -> int:
+        """Append an immutable payload digest and opaque source cursor."""
+        payload_hash = self._payload_sha256(payload)
+        previous = self.connection.execute(
+            "SELECT chain_hash FROM evidence_chain ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = str(previous[0]) if previous else "0" * 64
+        if isinstance(checkpoint, (dict, list, tuple)):
+            checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        elif checkpoint is None:
+            checkpoint_text = ""
+        else:
+            checkpoint_text = str(checkpoint)
+        material = "|".join((previous_hash, str(evidence_kind), str(source_id),
+                              str(source or "unknown"), str(observed_at),
+                              payload_hash, checkpoint_text))
+        chain_hash = hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+        cursor = self.connection.execute(
+            "INSERT OR IGNORE INTO evidence_chain(evidence_kind,source_id,source,observed_at,payload_sha256,previous_hash,chain_hash,source_checkpoint) VALUES(?,?,?,?,?,?,?,?)",
+            (str(evidence_kind), str(source_id), str(source or "unknown"), str(observed_at),
+             payload_hash, previous_hash, chain_hash, checkpoint_text or None),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def integrity_report(self) -> dict[str, object]:
+        return verify_evidence_chain(self.connection)
+
     def append_snapshot(self, record: dict[str, object]) -> int:
+        payload = json.dumps(record, ensure_ascii=True, sort_keys=True)
         cursor = self.connection.execute(
             "INSERT INTO snapshots(timestamp,platform,process_count,connection_count,payload) VALUES(?,?,?,?,?)",
             (str(record.get("timestamp", utc_now())), str(record.get("platform", "unknown")),
              len(record.get("processes") or []), len(record.get("connections") or []),
-             json.dumps(record, ensure_ascii=True, sort_keys=True)),
+             payload),
         )
         snapshot_id = int(cursor.lastrowid)
         timestamp = str(record.get("timestamp", utc_now()))
@@ -233,18 +349,32 @@ class EvidenceStore:
                 (session_id, agent_id, "local-process", timestamp, timestamp, metadata),
             )
             self.link_evidence("snapshot", str(snapshot_id), {"session_id": session_id}, "inferred")
+        self._append_chain(
+            "snapshot", str(snapshot_id), "collector", timestamp, payload,
+            record.get("sourceCheckpoints", record.get("sourceCheckpoint")),
+        )
         self.connection.commit()
         return snapshot_id
 
     def append_file_events(self, events: Iterable[FileChangeRecord], context: Optional[dict[str, object]] = None) -> list[int]:
         ids: list[int] = []
         for event in events:
+            # Hash the same normalized representation that is persisted in
+            # the relational row (``details`` is `{}` when omitted).
+            payload = json.dumps({"path": event.path, "action": event.action,
+                                  "source": event.source, "timestamp": event.timestamp,
+                                  "is_directory": bool(event.is_directory),
+                                  "details": event.details or {}},
+                                 ensure_ascii=True, sort_keys=True)
             cursor = self.connection.execute(
                 "INSERT INTO file_events(timestamp,path,action,source,is_directory,details) VALUES(?,?,?,?,?,?)",
                 (event.timestamp, event.path, event.action, event.source, int(event.is_directory),
                  json.dumps(event.details or {}, ensure_ascii=True, sort_keys=True)),
             )
             ids.append(int(cursor.lastrowid))
+            checkpoint = (event.details or {}).get("sourceCheckpoint") if isinstance(event.details, dict) else None
+            self._append_chain("file_event", str(cursor.lastrowid), event.source,
+                               event.timestamp, payload, checkpoint)
             if context:
                 self.link_evidence("file_event", str(cursor.lastrowid), context, "inferred")
         if ids:
@@ -280,6 +410,9 @@ class EvidenceStore:
             if cursor.rowcount == 0:
                 continue
             accepted.append(event_id)
+            checkpoint = event.get("sourceCheckpoint", event.get("sourceOffset", event.get("sequence")))
+            self._append_chain("web_event", event_id, str(event.get("source") or "web"),
+                               timestamp, payload, checkpoint)
             if session_id:
                 self.connection.execute(
                     "INSERT INTO sessions(session_id,agent,provider,first_seen,last_seen,event_count,metadata) VALUES(?,?,?,?,?,1,?) "
@@ -348,7 +481,6 @@ class EvidenceStore:
 
     def close(self) -> None:
         self.connection.close()
-
 
 class LinuxInotifyWatcher:
     """Low-level recursive inotify watcher with no external dependency.

@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "portable"))
 from operations_cli import main as cli_main
 from operations_runtime import OperationsRuntime
 from turn_journal import VerificationRun, _now
+from agentreins_portable import EvidenceStore
 
 
 class RuntimeHistoryTests(unittest.TestCase):
@@ -60,6 +61,22 @@ class RuntimeHistoryTests(unittest.TestCase):
         self.assertEqual(first["runtimeGraph"]["nodes"][0]["pid"], "42")
         self.assertEqual(first["collectorHealth"]["status"], "degraded")
         self.assertEqual(runtime.view()["summary"]["eventCount"], first["summary"]["eventCount"])
+
+    def test_view_exposes_live_evidence_integrity_chain(self):
+        collector = EvidenceStore(self.database)
+        collector.append_snapshot({
+            "schemaVersion": 2, "timestamp": "2026-10-06T00:00:00Z",
+            "platform": "test", "processes": [], "connections": [],
+            "sourceCheckpoint": {"offset": 7},
+        })
+        collector.close()
+        runtime = OperationsRuntime(self.database)
+        self.assertEqual(runtime.view()["evidenceIntegrity"]["status"], "healthy")
+        connection = sqlite3.connect(self.database)
+        connection.execute("UPDATE evidence_chain SET source_checkpoint='tampered'")
+        connection.commit()
+        connection.close()
+        self.assertEqual(runtime.view()["evidenceIntegrity"]["status"], "degraded")
 
     def test_protection_and_memory_results_survive_runtime_restart(self):
         path = self.root / "memory.md"

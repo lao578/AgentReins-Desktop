@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from agentreins_portable import verify_evidence_chain
     from evidence_projection import EvidenceProjector
     from turn_journal import TurnJournalStore, VerificationCommand
     from safety_features import FileProtectionStore, MemoryAuditor, SemanticAnalyzer, summarize_security
 except ImportError:
+    from .agentreins_portable import verify_evidence_chain
     from .evidence_projection import EvidenceProjector
     from .turn_journal import TurnJournalStore, VerificationCommand
     from .safety_features import FileProtectionStore, MemoryAuditor, SemanticAnalyzer, summarize_security
@@ -137,6 +139,16 @@ class OperationsRuntime:
         self._load_history()
         journal_view = self.journal.snapshot()
         protected_files = self.protection.list_rules()
+        # Read the integrity envelope through a short-lived connection so a
+        # collector process can append evidence while the desktop is open.
+        try:
+            with closing(sqlite3.connect(str(self.database), timeout=10)) as connection:
+                evidence_integrity = verify_evidence_chain(connection)
+        except sqlite3.Error as error:
+            evidence_integrity = {"algorithm": "sha256-chain-v1", "status": "unavailable",
+                                  "count": 0, "head": None,
+                                  "errors": [{"reason": type(error).__name__}],
+                                  "lastCheckpoint": None}
         with self._lock:
             projection = self.projector.project({})
             projection.update(journal_view)
@@ -149,6 +161,7 @@ class OperationsRuntime:
             projection["analysisConfiguration"] = dict(self.analysis.config)
             projection["collectorHealth"] = self._last_record.get("collectorHealth", {})
             projection["historyHealth"] = {"loaded": self._history_loaded, "errors": list(self._history_errors)}
+            projection["evidenceIntegrity"] = evidence_integrity
             return copy.deepcopy(projection)
 
     @staticmethod

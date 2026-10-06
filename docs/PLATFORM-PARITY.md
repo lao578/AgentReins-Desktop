@@ -42,8 +42,8 @@ release notes do not claim source- or UI-level identity with macOS.
 | Agent discovery and process lineage | `AgentDiscoveryManager`, `ProcessGuard`, native PID/PPID snapshots | CIM/PowerShell process snapshots with tasklist fallback, Agent process-tree scoping and process-rule backend | `/proc` with `ps` fallback, Agent process-tree scoping and process-rule backend | Partial: normalized lineage/runtime map exists; OS fields and rule UI differ |
 | Native session adapters | WorkBuddy native; Codex, Cursor, Qoder, Claude compatibility/browser adapters | Read-only JSON/JSONL/SQLite adapters for Codex, Claude, Qoder, WorkBuddy and Cursor | Same portable adapters | Partial: Kiro is not a native adapter; transcript schemas and lifecycle depth remain best-effort |
 | Prompt/model/tool/result lifecycle | `AgentSession` and adapter evidence with turn/tool correlation | Adapter events projected to sessions, timeline and tool calls; `TurnJournalStore` supports explicit begin/finish/ingest | Same | Partial: stable IDs and joins are present, but provider history and native lifecycle callbacks are incomplete |
-| Durable evidence | SQLite WAL, raw evidence, checkpoints, health, integrity and idempotent replay | SQLite WAL snapshots/file/web/session/tool/link tables plus journal and operations state; collector/history health is surfaced | Same | Partial: no macOS-equivalent raw hash-chain/source-checkpoint envelope yet |
-| Browser Native Messaging | Swift host plus extension validation | Python host and install script; packaged Native Host executable | Python host and install script | Near: protocol and validation are shared; installer/host hardening still differs |
+| Durable evidence | SQLite WAL, raw evidence, checkpoints, health, integrity and idempotent replay | SQLite WAL snapshots/file/web/session/tool/link tables plus journal and operations state; append-only SHA-256 evidence chain records payload digests and opaque source checkpoints | Same | Partial: chain integrity and source checkpoints are implemented; the native raw-evidence envelope and full idempotent replay contract still differ |
+| Browser Native Messaging | Swift host plus extension validation | Python host and install script; packaged Native Host executable | Python host packaged in AppImage/`.deb`, with per-user install command and manifest script | Near: protocol and validation are shared; AppImage users must extract the host before registering a stable path |
 | File monitoring | Protected paths, backup, diff, code scan, optional restoration; one-second polling | Polling by default; explicit opt-in ETW JSONL helper with heartbeat and fallback; in-app protected-file backup/restore | Recursive inotify with polling fallback; in-app protected-file backup/restore | Partial: event quality, overflow/heartbeat handling and full protection-rule UI still differ |
 | Network evidence | PID-owned `lsof`, tool intent, Git/SSH projection, proxy destination refinement | PowerShell TCP snapshots scoped to Agent process tree plus adapter/tool intent and proxy refinement | `ss` snapshots scoped to Agent process tree plus adapter/tool intent | Partial: short-lived sockets and destination refinement differ by OS |
 | Memory inventory and sensitive finding scan | Memory files, rules, scan, redact/delete/edit/restore workflow | `MemoryAuditor` inventory/scan/redact/delete-line/edit/restore backend; Memory tab exposes scan, redact and restore | Same | Partial: per-finding delete-line/edit/undo controls and settings parity are not complete in Tk |
@@ -67,7 +67,7 @@ without depending on Tk.
 | `portable/safety_features.py` | Code/tool/MCP/Skill/external-content/context scanners; protected-file SHA-256 backups/diff/restore; memory inventory, redaction, delete-line/edit/restore; optional OpenAI-compatible semantic analysis with local redaction | `Tests/Portable/test_safety_features.py`; no real provider request is made by tests |
 | `portable/operations_runtime.py` and `operations_cli.py` | Thread-safe shared facade, SQLite history hydration, `history/report`, `begin/finish`, `verify`, `recovery-preview/recover`, protection, memory and analysis actions | `Tests/Portable/test_operations_runtime.py`; CLI uses argv-only verification commands |
 | `portable/agent_adapters.py` | Incremental, read-only Codex/Claude/Qoder/WorkBuddy/Cursor JSON/JSONL and Cursor SQLite adapters with stable IDs, rotation/partial-row handling and workspace metadata | `Tests/Portable/test_agent_adapters.py`; provider schemas remain best-effort and version-sensitive |
-| `portable/agentreins_portable.py` | Agent process-tree scoping, Windows PowerShell and Linux `/proc`/`ss` collectors, recursive inotify, opt-in ETW JSONL helper with heartbeat/fallback, SQLite evidence tables and collector health | Existing portable collector tests; live ETW/inotify overflow and permission fixtures still pending |
+| `portable/agentreins_portable.py` | Agent process-tree scoping, Windows PowerShell and Linux `/proc`/`ss` collectors, recursive inotify, opt-in ETW JSONL helper with heartbeat/fallback, SQLite evidence tables, append-only SHA-256 evidence chain/source checkpoints and collector health | Portable collector tests cover chain health/tamper detection; live ETW/inotify overflow and permission fixtures still pending |
 | `portable/process_rules.py` and `provider_config.py` | Process-rule matching/alerts/explicit controller actions, PID-reuse protection, IP geolocation cache, proxy access-log parsing, and read-only provider configuration with credential redaction | `Tests/Portable/test_process_rules.py`, `test_provider_config.py`; live OS process-rule enforcement and provider-specific fixtures remain |
 | `portable/agentreins_desktop.py` | Tk desktop with Overview, Runtime map, Sessions, Timeline, Files, Tools, Security, External services, Generated code, Protected files, Verify/Recover, Memory, AI analysis, Processes, Connections and Raw JSON; filtering, auto-refresh, language switch and optional tray/background | `portable/desktop_smoke.py` validates 16 tabs, operation tables and worker actions; visual parity with SwiftUI is not claimed |
 
@@ -131,9 +131,14 @@ are the reasons the matrix still contains `Partial` or `Near` entries.
 - **Implemented:** versioned normalized events, `TurnJournalStore`, SQLite WAL
   persistence for snapshots/files/web/session/tool/link rows, journal payloads,
   operations state, and JSON report/export paths.
-- **Remaining:** raw-evidence hash chain, durable source checkpoints and a
-  macOS-equivalent health/integrity envelope. These are required before a
-  release can claim durable-evidence parity.
+- **Implemented:** accepted snapshots, file events and native/web events now
+  receive deterministic SHA-256 payload digests in an append-only chain. Each
+  record stores an opaque source checkpoint (offset, inode/rotation tuple,
+  ETW sequence, or adapter event ID), and `OperationsRuntime.view()` exposes
+  `evidenceIntegrity` with a tamper/degradation status.
+- **Remaining:** a macOS-equivalent raw-evidence envelope and full idempotent
+  replay/checkpoint recovery semantics. The chain is an integrity signal, not
+  a claim that every provider's source log can be reconstructed.
 
 ### P1: trace and attribution — implemented with conservative joins
 

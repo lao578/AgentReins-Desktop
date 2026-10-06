@@ -156,7 +156,7 @@ class AgentReinsDesktop(tk.Tk):
         "Recent sessions": "最近会话", "Activity timeline": "活动时间线", "File changes": "文件变更", "Tool calls": "工具调用",
         "Security findings": "安全发现", "Turn journals": "任务日志", "Path": "路径", "Action": "操作", "Source": "来源",
         "Confidence": "可信度", "Timestamp": "时间", "Kind": "类型", "Title": "标题", "Summary": "摘要", "Provider": "提供方",
-        "Tool": "工具", "Status": "状态", "Risk": "风险", "Evidence": "证据", "No data": "暂无数据",
+        "Tool": "工具", "Status": "状态", "Verification": "验证状态", "Risk": "风险", "Evidence": "证据", "No data": "暂无数据",
     }
 
     def _t(self, value: str, **format_values: Any) -> str:
@@ -380,7 +380,10 @@ class AgentReinsDesktop(tk.Tk):
         self._text(ttk.Button(controls, command=lambda: self._run_operation("recover")), "Recover selected").grid(row=2, column=1, pady=(6, 0), sticky="w")
         self._journal_tree = ttk.Treeview(self.verify_tab, columns=("agent", "status", "workspace", "prompt", "verification"), show="headings", selectmode="browse")
         self._journal_tree.grid(row=1, column=0, sticky="nsew")
-        for col, heading in zip(self._journal_tree["columns"], ("Agent", "Status", "Workspace", "Prompt", "Status")):
+        # Keep the final column distinct from the journal lifecycle status.  A
+        # duplicate heading made it impossible to tell whether a row was
+        # running/completed or had actually passed independent verification.
+        for col, heading in zip(self._journal_tree["columns"], ("Agent", "Status", "Workspace", "Prompt", "Verification")):
             self._journal_tree.heading(col, text=self._t(heading)); self._journal_tree.column(col, width=180, anchor="w", stretch=True)
         scroll = ttk.Scrollbar(self.verify_tab, orient="vertical", command=self._journal_tree.yview); scroll.grid(row=1, column=1, sticky="ns"); self._journal_tree.configure(yscrollcommand=scroll.set)
         self._verify_output = tk.Text(self.verify_tab, height=10, wrap="word", state="disabled", font=("Consolas", 9)); self._verify_output.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
@@ -652,6 +655,9 @@ class AgentReinsDesktop(tk.Tk):
         overview = [{"title": "Evidence coverage", "summary": (value.get("summary") or {}).get("confidence", "unknown"), "status": "observed"},
                     {"title": "Collector health", "summary": json.dumps(value.get("collectorHealth", {}), ensure_ascii=False), "status": (value.get("collectorHealth") or {}).get("status", "unknown")},
                     {"title": "Provider trust", "summary": f"{len(value.get('providerTrust') or [])} destination groups", "status": "unverified"}]
+        integrity = value.get("evidenceIntegrity") or {}
+        if integrity:
+            overview.append({"title": "Evidence integrity", "summary": f"{integrity.get('count', 0)} chained records", "status": integrity.get("status", "unknown")})
         self._operations_rows["overview"] = overview
         self._operations_rows["runtime"] = list((value.get("runtimeGraph") or {}).get("nodes") or [])
         self._operations_rows["sessions"] = [{**row, "sessionId": row.get("id", "")} for row in value.get("sessions", [])]

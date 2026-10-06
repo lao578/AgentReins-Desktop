@@ -46,10 +46,38 @@ if [[ "$MODE" == all || "$MODE" == appimage ]]; then
 fi
 mkdir -p "$OUT" "$BUILD"
 
+# The browser extension talks to a Native Messaging executable, not to the
+# desktop process.  Build that executable on Linux as part of the package so
+# AppImage and Debian users do not have to install a second Python runtime.
+# Keep it separate from build-linux.sh because the desktop build is windowed
+# while a native host must retain a console/stdin/stdout pipe.
+build_native_host() {
+  rm -f "$OUT/AgentReinsNativeHost"
+  "$PYTHON" -m PyInstaller \
+    --noconfirm --clean --onefile --console \
+    --name AgentReinsNativeHost \
+    --distpath "$OUT" \
+    --workpath "$BUILD/pyinstaller-native-host" \
+    --specpath "$BUILD/pyinstaller-native-host" \
+    "$ROOT/portable/native_host.py"
+  test -x "$OUT/AgentReinsNativeHost"
+}
+
+if [[ "$MODE" == all || "$MODE" == appimage || "$MODE" == deb ]]; then
+  build_native_host
+  sha256sum "$OUT/AgentReinsNativeHost" > "$OUT/AgentReinsNativeHost.sha256"
+fi
+
 make_appdir() {
   rm -rf "$APPDIR"
-  mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications"
+  mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/agentreins" \
+    "$APPDIR/usr/share/applications" "$APPDIR/usr/share/agentreins/BrowserExtension"
   cp -a "$OUT/AgentReins" "$APPDIR/usr/bin/AgentReins"
+  cp "$OUT/AgentReinsNativeHost" "$APPDIR/usr/lib/agentreins/AgentReinsNativeHost"
+  chmod 0755 "$APPDIR/usr/lib/agentreins/AgentReinsNativeHost"
+  cp -a "$ROOT/BrowserExtension/." "$APPDIR/usr/share/agentreins/BrowserExtension/"
+  chmod 0755 "$APPDIR/usr/share/agentreins/BrowserExtension/install-native-host-linux.sh"
+  chmod 0755 "$APPDIR/usr/share/agentreins/BrowserExtension/uninstall-native-host-linux.sh"
   if [[ -f "$ROOT/Assets/agentreins-logo.png" ]]; then
     cp "$ROOT/Assets/agentreins-logo.png" "$APPDIR/agentreins.png"
   fi
@@ -73,6 +101,24 @@ EOF
   # appimagetool discovers the launcher from the AppDir root. Keep the
   # freedesktop-standard copy under usr/share/applications as well.
   cp "$APPDIR/usr/share/applications/agentreins.desktop" "$APPDIR/agentreins.desktop"
+  # A stable launcher keeps the AppImage mount path out of the generated
+  # manifests.  Users can run this from the AppImage's extracted directory or
+  # pass the host path to the script directly.
+  cat > "$APPDIR/usr/bin/agentreins-install-native-host" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+exec "$APPDIR/usr/share/agentreins/BrowserExtension/install-native-host-linux.sh" \
+  "$APPDIR/usr/lib/agentreins/AgentReinsNativeHost"
+EOF
+  chmod +x "$APPDIR/usr/bin/agentreins-install-native-host"
+  cat > "$APPDIR/usr/bin/agentreins-uninstall-native-host" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+exec "$APPDIR/usr/share/agentreins/BrowserExtension/uninstall-native-host-linux.sh"
+EOF
+  chmod +x "$APPDIR/usr/bin/agentreins-uninstall-native-host"
 }
 
 make_appimage() {
@@ -117,6 +163,12 @@ make_deb() {
     "$ROOT/portable/build-linux.sh"
   fi
   cp -a "$OUT/AgentReins" "$root/usr/lib/agentreins/AgentReins"
+  cp "$OUT/AgentReinsNativeHost" "$root/usr/lib/agentreins/AgentReinsNativeHost"
+  chmod 0755 "$root/usr/lib/agentreins/AgentReinsNativeHost"
+  mkdir -p "$root/usr/share/agentreins/BrowserExtension"
+  cp -a "$ROOT/BrowserExtension/." "$root/usr/share/agentreins/BrowserExtension/"
+  chmod 0755 "$root/usr/share/agentreins/BrowserExtension/install-native-host-linux.sh"
+  chmod 0755 "$root/usr/share/agentreins/BrowserExtension/uninstall-native-host-linux.sh"
   cp "$ROOT/portable/agentreins_portable.py" "$root/usr/lib/agentreins/agentreins_portable.py"
   cp "$ROOT/portable/agent_adapters.py" "$root/usr/lib/agentreins/agent_adapters.py"
   # Keep the source-side modules next to the portable CLI as well as in the
@@ -141,7 +193,20 @@ EOF
 set -eu
 exec /usr/bin/python3 /usr/lib/agentreins/agentreins_portable.py "$@"
 EOF
-  chmod +x "$root/usr/bin/agentreins" "$root/usr/bin/agentreins-portable"
+  cat > "$root/usr/bin/agentreins-install-native-host" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+exec /usr/share/agentreins/BrowserExtension/install-native-host-linux.sh \
+  /usr/lib/agentreins/AgentReinsNativeHost
+EOF
+  cat > "$root/usr/bin/agentreins-uninstall-native-host" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+exec /usr/share/agentreins/BrowserExtension/uninstall-native-host-linux.sh
+EOF
+  chmod +x "$root/usr/bin/agentreins" "$root/usr/bin/agentreins-portable" \
+    "$root/usr/bin/agentreins-install-native-host" \
+    "$root/usr/bin/agentreins-uninstall-native-host"
   cat > "$root/usr/share/applications/agentreins.desktop" <<'EOF'
 [Desktop Entry]
 Name=AgentReins
@@ -168,6 +233,12 @@ WantedBy=default.target
 EOF
   cat > "$root/usr/share/doc/agentreins/README.Debian" <<'EOF'
 AgentReins stores evidence at ~/.local/share/AgentReins/evidence.jsonl.
+
+The optional browser Native Messaging host is installed with:
+  agentreins-install-native-host
+This writes per-user Chrome, Chromium, and Microsoft Edge manifests. Install
+the packaged BrowserExtension directory into the browser if needed.
+Remove those manifests with `agentreins-uninstall-native-host`.
 
 Enable the per-user collector after installation:
   systemctl --user daemon-reload

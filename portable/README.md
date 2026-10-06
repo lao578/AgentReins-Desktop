@@ -47,6 +47,18 @@ Session transcripts may contain prompts, responses, and tool arguments; they
 are stored locally in the configured evidence database/JSONL and are not sent
 to AgentReins servers.
 
+### Evidence integrity and source checkpoints
+
+Every accepted snapshot, file event, and browser/native event is also recorded
+in the SQLite `evidence_chain` table. The chain stores a SHA-256 digest of the
+canonical payload, the previous chain hash, and an opaque source checkpoint
+(for example a JSONL byte offset/inode tuple, ETW sequence, or adapter event
+ID). `EvidenceStore.integrity_report()` and the desktop runtime's
+`evidenceIntegrity` field expose `healthy`, `degraded`, or `unavailable`
+status without modifying evidence. A degraded chain indicates that a payload,
+cursor, or chain row changed after capture; it does not attempt to reconstruct
+provider-private source logs.
+
 ## Windows desktop executable
 
 The Tk desktop shell is packaged as a native, self-contained Windows EXE with

@@ -1,6 +1,6 @@
 # Release Process
 
-AgentReins CI builds a Universal 2 macOS application containing both `arm64` and `x86_64` code, a Windows executable/installer, and Linux AppImage/`.deb` packages. Pull requests and pushes to `main` may build unsigned development artifacts. Apple Developer ID signing/notarization and Windows Authenticode signing are enabled when their protected secrets are configured; missing secrets do not block a release, and CI reports unsigned/unnotarized artifacts explicitly. All release binaries/packages publish SHA-256 sidecars.
+AgentReins CI builds a Universal 2 macOS application containing both `arm64` and `x86_64` code, a Windows executable/installer, and Linux AppImage/`.deb` packages. Linux packages include the frozen Native Messaging host and per-user install/uninstall commands for Chrome/Chromium/Edge. Pull requests and pushes to `main` may build unsigned development artifacts. Apple Developer ID signing/notarization and Windows Authenticode signing are enabled when their protected secrets are configured; missing secrets do not block a release, and CI reports unsigned/unnotarized artifacts explicitly. All release binaries/packages publish SHA-256 sidecars.
 
 ## Required GitHub secrets for trusted distribution
 
