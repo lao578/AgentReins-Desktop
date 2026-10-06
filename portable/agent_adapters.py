@@ -205,23 +205,27 @@ def _provider_from_path(path: Path) -> Optional[str]:
     return None
 
 
-def _codex(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> list[dict[str, Any]]:
+def _codex(rows: Iterable[Mapping[str, Any]], source: str, fallback: str, state: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    state = state if state is not None else {}
     result: list[dict[str, Any]] = []
-    turn: Optional[str] = None
-    session = fallback
-    model: Optional[str] = None
-    tool_names: dict[str, str] = {}
+    turn: Optional[str] = state.get("turn")
+    session = str(state.get("session") or fallback)
+    model: Optional[str] = state.get("model")
+    tool_names: dict[str, str] = state.setdefault("tool_names", {})
+    workspace: Optional[str] = state.get("workspace")
     for index, row in enumerate(rows):
         row_key = _row_key(row, index)
         payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else row
         typ = str(row.get("type") or payload.get("type") or "")
         ts = _first(row, "timestamp", "ts") or _first(payload, "timestamp", "ts")
-        session = str(_first(payload, "id", "session_id", "sessionId") or session)
+        session = str(_first(payload, "session_id", "sessionId") or (payload.get("id") if typ in {"session_meta", "turn_context"} else None) or session)
+        workspace = str(_first(payload, "cwd", "workspace", "workdir") or workspace or "") or None
         if typ == "turn_context":
             turn = str(_first(payload, "turn_id", "turnId") or turn or "") or None
             model = str(_first(payload, "model", "model_name") or model or "") or None
             result.append(_event("codex", source, "context", session=session, turn=turn, timestamp=ts,
                                  model=model, command=_json({k: payload.get(k) for k in ("cwd", "model", "effort", "sandbox_policy") if k in payload}),
+                                 metadata={"workspace": workspace} if workspace else None,
                                  tool_name="codex.turn_context", action="captured", identity=f"{row_key}:turn"))
             continue
         if typ == "event_msg" and isinstance(payload.get("item"), Mapping):
@@ -231,7 +235,7 @@ def _codex(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> lis
                 if text:
                     turn = str(_first(payload, "turn_id", "turnId") or item.get("id") or turn or "") or None
                     result.append(_event("codex", source, "prompt", session=session, turn=turn, timestamp=ts,
-                                         text=text, model=model, action="sent", identity=f"{row_key}:prompt"))
+                                         text=text, model=model, action="sent", metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:prompt"))
             continue
         if typ == "response_item":
             role = str(payload.get("role") or "")
@@ -244,7 +248,7 @@ def _codex(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> lis
                 result.append(_event("codex", source, event_type, session=session, turn=turn, timestamp=ts,
                                      text=text, model=model, action="sent" if event_type == "prompt" else "received",
                                      tool_name="codex.developer_instructions" if role == "developer" else None,
-                                     identity=f"{row_key}:{role}"))
+                                     metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:{role}"))
                 continue
             if payload_type in {"custom_tool_call", "function_call", "tool_call"}:
                 call_id = str(_first(payload, "call_id", "callId", "id") or f"{index}")
@@ -255,28 +259,30 @@ def _codex(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> lis
                 tool_names[call_id] = name
                 result.append(_event("codex", source, "tool_call", session=session, turn=turn, tool_call=call_id,
                                      tool_name=name, timestamp=ts, command=_text(_first(payload, "input", "arguments")),
-                                     model=model, action="requested", identity=f"{row_key}:call:{call_id}"))
+                                     model=model, action="requested", metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:call:{call_id}"))
                 continue
             if payload_type in {"custom_tool_call_output", "function_call_output", "tool_result"}:
                 call_id = str(_first(payload, "call_id", "callId", "tool_call_id", "toolCallId") or f"{index}")
                 result.append(_event("codex", source, "tool_result", session=session, turn=turn, tool_call=call_id,
                                      tool_name=tool_names.get(call_id), timestamp=ts,
                                      text=_text(_first(payload, "output", "result", "content")), model=model,
-                                     action="completed", identity=f"{row_key}:result:{call_id}"))
+                                     action="completed", metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:result:{call_id}"))
                 continue
         if typ == "token_usage_record":
             usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else payload
             result.append(_event("codex", source, "context", session=session, turn=turn, timestamp=ts,
                                  model=model, tool_name="codex.usage", command=_json(usage), action="reported",
-                                 identity=f"{row_key}:usage"))
+                                 metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:usage"))
+    state.update({"turn": turn, "session": session, "model": model, "workspace": workspace})
     return result
 
 
-def _workbuddy(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> list[dict[str, Any]]:
+def _workbuddy(rows: Iterable[Mapping[str, Any]], source: str, fallback: str, state: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     """Parse WorkBuddy's local project JSONL message/function-call rows."""
+    state = state if state is not None else {}
     result: list[dict[str, Any]] = []
-    current_turn: dict[str, str] = {}
-    names: dict[str, str] = {}
+    current_turn: dict[str, str] = state.setdefault("current_turn", {})
+    names: dict[str, str] = state.setdefault("tool_names", {})
     for index, row in enumerate(rows):
         row_key = _row_key(row, index)
         session = _session(row, fallback)
@@ -326,20 +332,23 @@ def _workbuddy(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) ->
                                  timestamp=timestamp, text=_text(_first(row, "output", "result")),
                                  model=model, action=str(row.get("status") or "completed"),
                                  identity=f"{row_key}:result:{call_id}:{timestamp}"))
+    state.update({"current_turn": current_turn, "tool_names": names})
     return result
 
 
-def _claude_like(provider: str, rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> list[dict[str, Any]]:
+def _claude_like(provider: str, rows: Iterable[Mapping[str, Any]], source: str, fallback: str, state: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    state = state if state is not None else {}
     result: list[dict[str, Any]] = []
-    turn_by_uuid: dict[str, str] = {}
-    current_turn: Optional[str] = None
-    tool_names: dict[str, str] = {}
+    turn_by_uuid: dict[str, str] = state.setdefault("turn_by_uuid", {})
+    current_turn: Optional[str] = state.get("current_turn")
+    tool_names: dict[str, str] = state.setdefault("tool_names", {})
     for index, row in enumerate(rows):
         row_key = _row_key(row, index)
         session = _session(row, fallback)
         ts = _first(row, "timestamp", "ts", "createdAt", "created_at")
         typ = str(row.get("type") or row.get("eventType") or "")
         message = row.get("message") if isinstance(row.get("message"), Mapping) else row
+        workspace = _first(row, "cwd", "workspace", "workdir") or _first(message, "cwd", "workspace", "workdir")
         contents = _contents(message.get("content") if isinstance(message, Mapping) else message)
         parent = row.get("parentUuid") or row.get("parent_uuid")
         turn = turn_by_uuid.get(str(parent)) if parent else None
@@ -350,12 +359,14 @@ def _claude_like(provider: str, rows: Iterable[Mapping[str, Any]], source: str, 
             if not text and isinstance(row.get("humanInput"), Mapping):
                 text = _text(row["humanInput"].get("text"))
             if text:
-                current_turn = turn or uuid
+                # A new user prompt starts a new turn even if its parent is a
+                # previous assistant response. Native explicit IDs win.
+                current_turn = str(_first(row, "turnId", "turn_id", "promptId", "requestSetId") or uuid)
                 turn = current_turn
                 turn_by_uuid[uuid] = turn
                 result.append(_event(provider, source, "prompt", session=session, turn=turn, timestamp=ts, text=text,
                                      model=_first(message, "model") if isinstance(message, Mapping) else None,
-                                     action="sent", identity=f"{uuid}:prompt"))
+                                     action="sent", metadata={"workspace": workspace} if workspace else None, identity=f"{uuid}:prompt"))
         if typ in {"assistant", "response"}:
             text_parts: list[str] = []
             for item in contents:
@@ -364,13 +375,13 @@ def _claude_like(provider: str, rows: Iterable[Mapping[str, Any]], source: str, 
                 elif str(item.get("type")) in {"thinking", "reasoning"} and _text(item.get("thinking") or item.get("text")):
                     result.append(_event(provider, source, "reasoning", session=session, turn=turn, timestamp=ts,
                                          text=_text(item.get("thinking") or item.get("text")), action="observed",
-                                         identity=f"{row_key}:reasoning:{len(result)}"))
+                                         metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:reasoning:{len(result)}"))
             if not text_parts and _text(row.get("response")):
                 text_parts.append(_text(row.get("response")) or "")
             if text_parts:
                 result.append(_event(provider, source, "response", session=session, turn=turn, timestamp=ts,
                                      text="\n".join(text_parts), model=_first(message, "model") if isinstance(message, Mapping) else None,
-                                     action=str(_first(message, "stop_reason", "status") or "received"), identity=f"{row_key}:response"))
+                                     action=str(_first(message, "stop_reason", "status") or "received"), metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:response"))
         for item in contents:
             item_type = str(item.get("type") or "")
             if item_type in {"tool_use", "function_call", "tool_call"}:
@@ -379,20 +390,23 @@ def _claude_like(provider: str, rows: Iterable[Mapping[str, Any]], source: str, 
                 tool_names[call_id] = name
                 result.append(_event(provider, source, "tool_call", session=session, turn=turn, tool_call=call_id,
                                      tool_name=name, timestamp=ts, command=_json(_first(item, "input", "arguments", "parameters")),
-                                     action="requested", identity=f"{row_key}:call:{call_id}"))
+                                     action="requested", metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:call:{call_id}"))
             elif item_type in {"tool_result", "function_result", "tool_output"}:
                 call_id = str(_first(item, "tool_use_id", "tool_call_id", "call_id", "toolCallId") or f"{uuid}:tool")
                 result.append(_event(provider, source, "tool_result", session=session, turn=turn, tool_call=call_id,
                                      tool_name=tool_names.get(call_id), timestamp=ts,
                                      text=_text(_first(item, "content", "output", "result")),
-                                     action="failed" if item.get("is_error") else "completed", identity=f"{row_key}:result:{call_id}"))
+                                     action="failed" if item.get("is_error") else "completed", metadata={"workspace": workspace} if workspace else None, identity=f"{row_key}:result:{call_id}"))
         if typ in {"runtime-config", "permission-mode", "workspace-directories", "context"}:
             result.append(_event(provider, source, "context", session=session, turn=turn, timestamp=ts,
                                  command=_json(row), action="observed", identity=f"{row_key}:context"))
+        if turn:
+            turn_by_uuid[uuid] = turn
+    state.update({"turn_by_uuid": turn_by_uuid, "current_turn": current_turn, "tool_names": tool_names})
     return result
 
 
-def _cursor(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> list[dict[str, Any]]:
+def _cursor(rows: Iterable[Mapping[str, Any]], source: str, fallback: str, state: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     """Project Cursor transcript JSON/JSONL and common exported bubble shapes."""
     flattened: list[Mapping[str, Any]] = []
     for row in rows:
@@ -403,8 +417,9 @@ def _cursor(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> li
         else:
             flattened.append(row)
     flattened.sort(key=lambda row: _sort_timestamp(_first(row, "createdAt", "timestamp", "updatedAt")))
+    state = state if state is not None else {}
     result: list[dict[str, Any]] = []
-    turn: Optional[str] = None
+    turn: Optional[str] = state.get("turn")
     for index, row in enumerate(flattened):
         row_key = _row_key(row, index)
         session = _session(row, fallback)
@@ -417,7 +432,7 @@ def _cursor(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> li
             if text:
                 turn = ident
                 result.append(_event("cursor", source, "prompt", session=session, turn=turn, timestamp=ts,
-                                     text=text, model=_first(row, "model", "modelName"), action="sent", identity=f"{ident}:prompt"))
+                                     text=text, model=_first(row, "model", "modelName"), action="sent", metadata={"workspace": row.get("workspace")} if row.get("workspace") else None, identity=f"{ident}:prompt"))
             continue
         tool = row.get("toolFormerData") if isinstance(row.get("toolFormerData"), Mapping) else row.get("tool")
         if isinstance(tool, Mapping):
@@ -425,29 +440,59 @@ def _cursor(rows: Iterable[Mapping[str, Any]], source: str, fallback: str) -> li
             name = str(_first(tool, "name", "toolName") or "unknown_tool")
             result.append(_event("cursor", source, "tool_call", session=session, turn=turn, tool_call=call_id,
                                  tool_name=name, timestamp=ts, command=_text(_first(tool, "params", "arguments", "input")),
-                                 action="requested", identity=f"{ident}:call"))
+                                 action="requested", metadata={"workspace": row.get("workspace")} if row.get("workspace") else None, identity=f"{ident}:call"))
             if _first(tool, "result", "output") is not None:
                 result.append(_event("cursor", source, "tool_result", session=session, turn=turn, tool_call=call_id,
                                      tool_name=name, timestamp=ts, text=_text(_first(tool, "result", "output")),
-                                     action=str(tool.get("status") or "completed"), identity=f"{ident}:result"))
+                                     action=str(tool.get("status") or "completed"), metadata={"workspace": row.get("workspace")} if row.get("workspace") else None, identity=f"{ident}:result"))
             continue
         if role in {"assistant", "model"} or bubble_type in (2, "2"):
             if text:
                 result.append(_event("cursor", source, "response", session=session, turn=turn, timestamp=ts,
-                                     text=text, model=_first(row, "model", "modelName"), action="received", identity=f"{row_key}:response"))
+                                     text=text, model=_first(row, "model", "modelName"), action="received", metadata={"workspace": row.get("workspace")} if row.get("workspace") else None, identity=f"{row_key}:response"))
+    state["turn"] = turn
     return result
 
 
-def parse_records(provider: str, records: Iterable[Mapping[str, Any]], source: str, session_hint: str) -> list[dict[str, Any]]:
-    """Parse records for one provider. Public for fixture tests and integrations."""
+def parse_records(provider: str, records: Iterable[Mapping[str, Any]], source: str, session_hint: str, state: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    """Parse records; pass mutable ``state`` to preserve append-stream context.
+
+    State is scoped to one source by NativeSessionReader. Sessions within
+    generic/Claude/WorkBuddy exports get separate contexts, preventing one
+    conversation's current turn or tool names leaking into another.
+    """
     provider = provider.lower()
-    if provider == "codex":
-        return _codex(records, source, session_hint)
-    if provider == "cursor":
-        return _cursor(records, source, session_hint)
-    if provider == "workbuddy":
-        return _workbuddy(records, source, session_hint)
-    return _claude_like(provider, records, source, session_hint)
+    state = state if state is not None else {}
+    events = []
+    for row in records:
+        if not isinstance(row, Mapping):
+            continue
+        session = _session(row, session_hint)
+        context = state if provider == "codex" else state.setdefault("sessions", {}).setdefault(session, {})
+        payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else row
+        workspace = _first(row, "cwd", "workspace", "workdir") or _first(payload, "cwd", "workspace", "workdir") or context.get("workspace")
+        if isinstance(workspace, str):
+            context["workspace"] = workspace
+        if provider == "codex":
+            parsed = _codex([row], source, session_hint, context)
+        elif provider == "cursor":
+            parsed = _cursor([row], source, session, context)
+        elif provider == "workbuddy":
+            parsed = _workbuddy([row], source, session, context)
+        else:
+            parsed = _claude_like(provider, [row], source, session, context)
+        workspace = context.get("workspace")
+        for event in parsed:
+            if workspace:
+                event.setdefault("metadata", {}).setdefault("workspace", workspace)
+            events.append(event)
+        # Tool history is a bounded join cache, not an unbounded transcript.
+        for name in ("tool_names", "turn_by_uuid"):
+            cache = context.get(name)
+            if isinstance(cache, dict):
+                while len(cache) > 2048:
+                    cache.pop(next(iter(cache)))
+    return events
 
 
 class NativeSessionReader:
@@ -463,6 +508,9 @@ class NativeSessionReader:
         self.offsets: dict[str, int] = {}
         self.fingerprints: dict[str, tuple[int, int, int]] = {}
         self._cursor_fingerprints: dict[str, tuple[int, int]] = {}
+        # Parser state persists across append-only polls.  Without it a tool
+        # result in a later batch loses the call's name and active turn.
+        self._parser_state: dict[tuple[str, str], dict[str, Any]] = {}
         self._discovery_cache: list[tuple[str, Path]] = []
         self._discover_after = 0.0
         self.last_errors = 0
@@ -553,6 +601,7 @@ class NativeSessionReader:
                 replaced = old_fingerprint and old_fingerprint[0] != fingerprint[0]
                 if replaced or fingerprint[1] < previous or rewritten:
                     previous = max(0, fingerprint[1] - MAX_BYTES_PER_FILE) if path.suffix.lower() != ".json" else 0
+                    self._parser_state.pop((provider, key), None)
                 self.fingerprints[key] = fingerprint
                 if key not in self.offsets and path.suffix.lower() != ".json" and fingerprint[1] > MAX_BYTES_PER_FILE:
                     # Start with a bounded tail of historical transcripts;
@@ -579,7 +628,8 @@ class NativeSessionReader:
                         continue
                     data = data[:complete_length]
                 records = self._records(data, path.suffix.lower())
-                parsed = parse_records(provider, records, key, path.stem)
+                parsed = parse_records(provider, records, key, path.stem,
+                                       self._parser_state.setdefault((provider, key), {}))
                 events.extend(parsed)
                 self.offsets[key] = (previous + len(data)) if path.suffix.lower() != ".json" else fingerprint[1]
                 files_seen += 1

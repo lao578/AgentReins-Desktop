@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import locale
+import os
 import queue
 import sys
 import threading
@@ -19,8 +20,13 @@ import time
 import tkinter as tk
 from dataclasses import asdict
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Optional
+
+try:
+    from operations_runtime import OperationsRuntime
+except ImportError:
+    from .operations_runtime import OperationsRuntime
 
 try:
     from agent_adapters import NativeSessionReader
@@ -57,8 +63,8 @@ class AgentReinsDesktop(tk.Tk):
         self._localized_headings: list[tuple[Any, str, str]] = []
         self._notebook_tabs: list[tuple[Any, str, str]] = []
         self.title("AgentReins")
-        self.minsize(900, 620)
-        self.geometry("1120x760")
+        self.minsize(1040, 720)
+        self.geometry("1360x880")
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         resolved_paths = platform_paths()
@@ -77,6 +83,25 @@ class AgentReinsDesktop(tk.Tk):
         self._last_record: Optional[dict[str, Any]] = None
         self._process_rows: list[dict[str, Any]] = []
         self._network_rows: list[dict[str, Any]] = []
+        self._operations_rows: dict[str, list[dict[str, Any]]] = {}
+        self._operations_trees: dict[str, ttk.Treeview] = {}
+        self._operations_details: dict[str, tk.Text] = {}
+        self._operations_view: dict[str, Any] = {}
+        self._operations_runtime: Optional[OperationsRuntime] = None
+        self._runtime_lock = threading.Lock()
+        self._action_threads: list[threading.Thread] = []
+        self._action_busy = False
+        # Monotonic generation for operation views. A startup/history query
+        # can finish after a mutating action (begin/finish/verify/recover);
+        # stale history must not overwrite the live journal rendered by that
+        # newer action.
+        self._operations_epoch = 0
+        self._updating_operations = False
+        self._live_follow = tk.BooleanVar(value=True)
+        self._agent_filter = tk.StringVar(value="All agents")
+        self._operation_selection: dict[str, dict[str, Any]] = {}
+        self._workspace_var = tk.StringVar(value=str(Path.cwd()))
+        self._journal_var = tk.StringVar()
         self._tray_icon: Any = None
         self._tray_supported = False
         self._tray_thread: Optional[threading.Thread] = None
@@ -87,6 +112,7 @@ class AgentReinsDesktop(tk.Tk):
         self.filter_var.trace_add("write", self._filter_changed)
         self._prepare_optional_tray()
         self.after(100, self._drain_events)
+        self._history_after = self.after(200, lambda: self._run_operation("history"))
         if start_watch:
             self.after(250, self.toggle_watch)
         if start_background:
@@ -124,6 +150,13 @@ class AgentReinsDesktop(tk.Tk):
         "Version {version} is available. Open the release page to download it?": "发现新版本 {version}。要打开发布页面下载吗？",
         "Could not check for updates: {error}": "检查更新失败：{error}", "Snapshot failed: {error}": "快照采集失败：{error}",
         "Watch failed: {error}": "监控失败：{error}", "Last snapshot: {timestamp}  |  Saved to {path}": "最近快照：{timestamp}  |  已保存到 {path}",
+        "Sessions": "会话", "Timeline": "时间线", "Files": "文件", "Tools": "工具调用", "Security": "安全", "Verify / Recover": "验证 / 恢复",
+        "Memory": "记忆审计", "Workspace": "工作区", "Begin turn": "开始任务", "Finish turn": "结束任务", "Verify selected": "验证所选任务",
+        "Preview recovery": "预览恢复", "Recover selected": "恢复所选任务", "Scan memory": "扫描记忆", "No journal selected": "未选择任务日志",
+        "Recent sessions": "最近会话", "Activity timeline": "活动时间线", "File changes": "文件变更", "Tool calls": "工具调用",
+        "Security findings": "安全发现", "Turn journals": "任务日志", "Path": "路径", "Action": "操作", "Source": "来源",
+        "Confidence": "可信度", "Timestamp": "时间", "Kind": "类型", "Title": "标题", "Summary": "摘要", "Provider": "提供方",
+        "Tool": "工具", "Status": "状态", "Risk": "风险", "Evidence": "证据", "No data": "暂无数据",
     }
 
     def _t(self, value: str, **format_values: Any) -> str:
@@ -153,6 +186,9 @@ class AgentReinsDesktop(tk.Tk):
             notebook.tab(child, text=self._t(source_text))
         for widget, source_text in self.summary_cards:
             widget.configure(text=self._t(source_text))
+        if hasattr(self, "_navigation"):
+            for index, (_, _, title) in enumerate(self._notebook_tabs):
+                self._navigation.item(str(index), text=self._t(title))
         self.language_var.set("中文" if self._language == "zh_CN" else "English")
 
     def _build_widgets(self) -> None:
@@ -189,6 +225,9 @@ class AgentReinsDesktop(tk.Tk):
         language_picker.bind("<<ComboboxSelected>>", lambda _event: self._set_language(self.language_var.get()))
         self.update_button = self._text(ttk.Button(controls, command=self.check_updates), "Check for updates")
         self.update_button.grid(row=3, column=2, columnspan=2, sticky="w", pady=(8, 0), padx=(8, 0))
+        self._text(ttk.Label(controls), "Workspace").grid(row=4, column=0, pady=(8, 0), sticky="w")
+        ttk.Entry(controls, textvariable=self._workspace_var).grid(row=4, column=1, columnspan=4, pady=(8, 0), sticky="ew")
+        self._text(ttk.Button(controls, command=self._choose_workspace), "Browse...").grid(row=4, column=5, padx=(8, 0), pady=(8, 0))
 
         ttk.Separator(self, orient="horizontal").grid(row=3, column=0, sticky="ew")
         self.summary_frame = ttk.Frame(self, padding=(12, 10, 12, 4))
@@ -217,19 +256,21 @@ class AgentReinsDesktop(tk.Tk):
 
         content = ttk.Frame(self, padding=(12, 4, 12, 0))
         content.grid(row=5, column=0, sticky="nsew")
-        content.columnconfigure(0, weight=1)
+        content.columnconfigure(1, weight=1)
         content.rowconfigure(2, weight=1)
         self.rowconfigure(5, weight=1)
 
         agent_header = ttk.Frame(content)
-        agent_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        agent_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         self._text(ttk.Label(agent_header, font=("TkDefaultFont", 11, "bold")), "Detected agents").grid(row=0, column=0, sticky="w")
         self.agent_cards = ttk.Frame(content)
-        self.agent_cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.agent_cards.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         self.agent_cards.columnconfigure(0, weight=1)
 
-        self.notebook = ttk.Notebook(content)
-        self.notebook.grid(row=2, column=0, sticky="nsew")
+        style = ttk.Style(self)
+        style.layout("Operations.TNotebook.Tab", [])
+        self.notebook = ttk.Notebook(content, style="Operations.TNotebook")
+        self.notebook.grid(row=2, column=1, sticky="nsew")
         self.process_tab = ttk.Frame(self.notebook, padding=8)
         self.network_tab = ttk.Frame(self.notebook, padding=8)
         self.raw_tab = ttk.Frame(self.notebook, padding=8)
@@ -238,6 +279,49 @@ class AgentReinsDesktop(tk.Tk):
         self.notebook.add(self.raw_tab, text=self._t("Raw JSON"))
         self._notebook_tabs.extend(((self.notebook, self.process_tab, "Processes tab"), (self.notebook, self.network_tab, "Connections tab"), (self.notebook, self.raw_tab, "Raw JSON")))
         self._build_tables()
+
+        for key, title, columns, headings in (
+            ("overview", "Overview", ("title", "summary", "status"), ("Title", "Summary", "Status")),
+            ("runtime", "Runtime map", ("pid", "ppid", "agent", "component", "responsibility"), ("PID", "Parent", "Agent", "Component", "Responsibility")),
+            ("sessions", "Sessions", ("provider", "sessionId", "status", "eventCount", "toolCount", "confidence"), ("Provider", "Session", "Status", "Events", "Tools", "Confidence")),
+            ("timeline", "Timeline", ("timestamp", "kind", "title", "summary", "confidence"), ("Timestamp", "Kind", "Title", "Summary", "Confidence")),
+            ("files", "Files", ("timestamp", "action", "path", "source", "confidence"), ("Timestamp", "Action", "Path", "Source", "Confidence")),
+            ("tools", "Tools", ("toolName", "status", "risk", "sessionId", "confidence"), ("Tool", "Status", "Risk", "Session", "Confidence")),
+            ("security", "Security", ("severity", "title", "evidence", "confidence"), ("Severity", "Title", "Evidence", "Confidence")),
+            ("providers", "External services", ("provider", "level", "models", "reason"), ("Provider", "Status", "Model", "Evidence")),
+            ("generated", "Generated code", ("severity", "title", "toolName", "line", "evidence"), ("Severity", "Title", "Tool", "Line", "Evidence")),
+            ("protected", "File protection", ("path", "autoRestore", "operations", "createdAt"), ("Path", "Auto restore", "Operations", "Created")),
+        ):
+            tab = ttk.Frame(self.notebook, padding=8)
+            self.notebook.add(tab, text=self._t(title))
+            self._notebook_tabs.append((self.notebook, tab, title))
+            self._build_operation_table(tab, key, columns, headings)
+
+        self.verify_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(self.verify_tab, text=self._t("Verify / Recover"))
+        self._notebook_tabs.append((self.notebook, self.verify_tab, "Verify / Recover"))
+        self._build_verify_tab()
+
+        self.memory_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(self.memory_tab, text=self._t("Memory"))
+        self._notebook_tabs.append((self.notebook, self.memory_tab, "Memory"))
+        self._build_memory_tab()
+        self._build_analysis_tab()
+
+        sidebar = ttk.Frame(content, padding=(0, 0, 10, 0))
+        sidebar.grid(row=2, column=0, sticky="ns")
+        sidebar.rowconfigure(2, weight=1)
+        self._agent_picker = ttk.Combobox(sidebar, textvariable=self._agent_filter, values=("All agents",), width=19, state="readonly")
+        self._agent_picker.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self._agent_picker.bind("<<ComboboxSelected>>", lambda _e: self._populate_operations(self._operations_view))
+        self._text(ttk.Checkbutton(sidebar, variable=self._live_follow), "Follow live").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self._navigation = ttk.Treeview(sidebar, show="tree", selectmode="browse", height=15)
+        self._navigation.column("#0", width=150, stretch=False)
+        self._navigation.grid(row=2, column=0, sticky="ns")
+        for index, (_, child, title) in enumerate(self._notebook_tabs):
+            self._navigation.insert("", "end", iid=str(index), text=self._t(title))
+        self._navigation.bind("<<TreeviewSelect>>", self._navigate)
+        self._navigation.selection_set("3")
 
         self.output = tk.Text(self.raw_tab, wrap="none", undo=False, font=("Consolas", 10), state="disabled")
         self.output.pack(side="left", fill="both", expand=True)
@@ -249,6 +333,93 @@ class AgentReinsDesktop(tk.Tk):
 
         status = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=(8, 4))
         status.grid(row=6, column=0, sticky="ew", padx=12, pady=(8, 12))
+
+    def _build_operation_table(self, parent: ttk.Frame, key: str, columns: tuple[str, ...], headings: tuple[str, ...]) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        top.columnconfigure(1, weight=1)
+        self._text(ttk.Label(top), "Filter:").grid(row=0, column=0, padx=(0, 6))
+        query = tk.StringVar()
+        setattr(self, f"_{key}_filter", query)
+        ttk.Entry(top, textvariable=query).grid(row=0, column=1, sticky="ew")
+        self._text(ttk.Button(top, command=lambda q=query: q.set("")), "Clear").grid(row=0, column=2, padx=(6, 0))
+        if key == "protected":
+            for index, (title, action) in enumerate((("Protect file", "protect"), ("Restore file", "restore-file"), ("Remove rule", "unprotect")), 3):
+                self._text(ttk.Button(top, command=lambda a=action: self._run_operation(a)), title).grid(row=0, column=index, padx=(6, 0))
+        tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
+        tree.grid(row=1, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scrollbar.set)
+        for column, heading in zip(columns, headings):
+            tree.heading(column, text=self._t(heading))
+            tree.column(column, width=150 if column not in {"summary", "evidence", "path", "sessionId"} else 300, anchor="w", stretch=True)
+        details = tk.Text(parent, height=10, wrap="word", state="disabled", font=("Consolas", 9))
+        details.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self._operations_trees[key] = tree
+        self._operations_details[key] = details
+        self._operations_rows[key] = []
+        tree.bind("<<TreeviewSelect>>", lambda _event, k=key: self._show_operation_detail(k))
+        query.trace_add("write", lambda *_args, k=key: self._populate_operation_table(k))
+
+    def _build_verify_tab(self) -> None:
+        self.verify_tab.columnconfigure(0, weight=1)
+        self.verify_tab.rowconfigure(2, weight=1)
+        controls = ttk.Frame(self.verify_tab)
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        controls.columnconfigure(1, weight=1)
+        self._text(ttk.Label(controls), "Workspace").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(controls, textvariable=self._workspace_var).grid(row=0, column=1, sticky="ew")
+        self._text(ttk.Button(controls, command=self._choose_workspace), "Browse...").grid(row=0, column=2, padx=(6, 0))
+        self._text(ttk.Button(controls, command=lambda: self._run_operation("begin")), "Begin turn").grid(row=1, column=0, pady=(6, 0), sticky="w")
+        self._text(ttk.Button(controls, command=lambda: self._run_operation("finish")), "Finish turn").grid(row=1, column=1, pady=(6, 0), sticky="w")
+        self._text(ttk.Button(controls, command=lambda: self._run_operation("verify")), "Verify selected").grid(row=1, column=2, pady=(6, 0), padx=(6, 0), sticky="w")
+        self._text(ttk.Button(controls, command=lambda: self._run_operation("recovery-preview")), "Preview recovery").grid(row=2, column=0, pady=(6, 0), sticky="w")
+        self._text(ttk.Button(controls, command=lambda: self._run_operation("recover")), "Recover selected").grid(row=2, column=1, pady=(6, 0), sticky="w")
+        self._journal_tree = ttk.Treeview(self.verify_tab, columns=("agent", "status", "workspace", "prompt", "verification"), show="headings", selectmode="browse")
+        self._journal_tree.grid(row=1, column=0, sticky="nsew")
+        for col, heading in zip(self._journal_tree["columns"], ("Agent", "Status", "Workspace", "Prompt", "Status")):
+            self._journal_tree.heading(col, text=self._t(heading)); self._journal_tree.column(col, width=180, anchor="w", stretch=True)
+        scroll = ttk.Scrollbar(self.verify_tab, orient="vertical", command=self._journal_tree.yview); scroll.grid(row=1, column=1, sticky="ns"); self._journal_tree.configure(yscrollcommand=scroll.set)
+        self._verify_output = tk.Text(self.verify_tab, height=10, wrap="word", state="disabled", font=("Consolas", 9)); self._verify_output.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        self._journal_tree.bind("<<TreeviewSelect>>", lambda _event: self._select_journal())
+
+    def _build_memory_tab(self) -> None:
+        self.memory_tab.columnconfigure(0, weight=1); self.memory_tab.rowconfigure(1, weight=1)
+        top = ttk.Frame(self.memory_tab); top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for title, action in (("Scan memory", "scan-memory"), ("Scan selected folder", "scan-memory-folder"), ("Redact selected", "redact-memory"), ("Restore memory", "restore-memory")):
+            self._text(ttk.Button(top, command=lambda a=action: self._run_operation(a)), title).pack(side="left", padx=(0, 6))
+        table = ttk.Frame(self.memory_tab)
+        table.grid(row=1, column=0, sticky="nsew")
+        self._build_operation_table(table, "memory", ("path", "type", "line", "severity", "preview"), ("Path", "Kind", "Line", "Severity", "Evidence"))
+        self._memory_output = self._operations_details["memory"]
+
+    def _navigate(self, _event: Any = None) -> None:
+        selection = self._navigation.selection()
+        if selection:
+            index = int(selection[0])
+            if 0 <= index < len(self._notebook_tabs):
+                self.notebook.select(self._notebook_tabs[index][1])
+
+    def _build_analysis_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(tab, text=self._t("AI analysis"))
+        self._notebook_tabs.append((self.notebook, tab, "AI analysis"))
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(6, weight=1)
+        self._analysis_url = tk.StringVar(value="https://api.openai.com/v1")
+        self._analysis_model = tk.StringVar(value="gpt-4o-mini")
+        self._analysis_key = tk.StringVar()
+        for index, (title, variable) in enumerate((("Endpoint", self._analysis_url), ("Model", self._analysis_model), ("API key (this run only)", self._analysis_key))):
+            self._text(ttk.Label(tab), title).grid(row=index, column=0, sticky="w", pady=5, padx=(0, 8))
+            ttk.Entry(tab, textvariable=variable, show="*" if index == 2 else "").grid(row=index, column=1, sticky="ew")
+        self._text(ttk.Label(tab, wraplength=720), "Analysis sends selected evidence to this endpoint after redaction. Review the selection before sending.").grid(row=3, column=0, columnspan=2, sticky="w", pady=10)
+        self._text(ttk.Button(tab, command=lambda: self._run_operation("configure-analysis")), "Save analysis settings").grid(row=4, column=0, sticky="w")
+        self._text(ttk.Button(tab, command=lambda: self._run_operation("analyze")), "Analyze selected evidence").grid(row=4, column=1, sticky="w")
+        self._analysis_output = tk.Text(tab, state="disabled", wrap="word")
+        self._analysis_output.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
 
     def _build_tables(self) -> None:
         for parent, columns, headings in (
@@ -415,6 +586,251 @@ class AgentReinsDesktop(tk.Tk):
         self._apply_filter()
         self._set_output(self._render_snapshot(record))
 
+    def _ensure_operations_runtime(self, database: Optional[Path] = None) -> OperationsRuntime:
+        if database is None:
+            raise ValueError("A captured database path is required")
+        with self._runtime_lock:
+            if self._operations_runtime is None or self._operations_runtime.database != database:
+                self._operations_runtime = OperationsRuntime(database)
+            return self._operations_runtime
+
+    @staticmethod
+    def _set_text_widget(widget: tk.Text, value: Any) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", json.dumps(value, ensure_ascii=False, indent=2, default=str) if not isinstance(value, str) else value)
+        widget.configure(state="disabled")
+
+    def _populate_operation_table(self, key: str) -> None:
+        tree = self._operations_trees.get(key)
+        if tree is None:
+            return
+        rows = self._operations_rows.get(key, [])
+        query = getattr(self, f"_{key}_filter").get().strip().lower()
+        current = self._selected_operation(key)
+        identity = self._row_identity(current) if current else None
+        tree.delete(*tree.get_children())
+        columns = tuple(tree["columns"])
+        for index, row in enumerate(rows):
+            values = tuple(str(row.get(column, "")) for column in columns)
+            if query and query not in " ".join(values).lower():
+                continue
+            agent = self._agent_filter.get()
+            if agent != "All agents" and key not in {"overview", "memory", "protected"} and str(row.get("provider") or row.get("agent") or "") != agent:
+                continue
+            tree.insert("", "end", iid=str(index), values=values)
+            if identity is not None and self._row_identity(row) == identity:
+                tree.selection_set(str(index))
+
+    @staticmethod
+    def _row_identity(row: dict[str, Any]) -> str:
+        return str(row.get("key") or row.get("id") or row.get("eventId") or row.get("toolCallId") or row.get("provider") or row.get("path") or json.dumps(row, sort_keys=True, default=str))
+
+    def _show_operation_detail(self, key: str) -> None:
+        tree = self._operations_trees.get(key)
+        if tree is None:
+            return
+        selected = tree.selection()
+        if not selected:
+            return
+        try:
+            row = self._operations_rows[key][int(selected[0])]
+        except (KeyError, ValueError, IndexError):
+            return
+        self._operation_selection[key] = row
+        self._last_evidence_selection = row
+        evidence: Any = row
+        if key == "sessions":
+            evidence = {**row, "events": [event for event in self._operations_view.get("timeline", []) if event.get("sessionId") == row.get("sessionId") and event.get("provider") == row.get("provider")],
+                        "context": [context for context in self._operations_view.get("contextReports", []) if context.get("sessionId") == row.get("sessionId") and context.get("provider") == row.get("provider")]}
+            self._last_evidence_selection = evidence
+        self._set_text_widget(self._operations_details[key], evidence)
+
+    def _populate_operations(self, value: dict[str, Any]) -> None:
+        self._operations_view = value or {}
+        timeline = list(value.get("timeline") or [])
+        overview = [{"title": "Evidence coverage", "summary": (value.get("summary") or {}).get("confidence", "unknown"), "status": "observed"},
+                    {"title": "Collector health", "summary": json.dumps(value.get("collectorHealth", {}), ensure_ascii=False), "status": (value.get("collectorHealth") or {}).get("status", "unknown")},
+                    {"title": "Provider trust", "summary": f"{len(value.get('providerTrust') or [])} destination groups", "status": "unverified"}]
+        self._operations_rows["overview"] = overview
+        self._operations_rows["runtime"] = list((value.get("runtimeGraph") or {}).get("nodes") or [])
+        self._operations_rows["sessions"] = [{**row, "sessionId": row.get("id", "")} for row in value.get("sessions", [])]
+        self._operations_rows["timeline"] = timeline
+        self._operations_rows["files"] = [{**row, "action": row.get("details", {}).get("action", ""), "path": row.get("details", {}).get("path", row.get("summary", ""))} for row in timeline if row.get("kind") == "file"]
+        self._operations_rows["tools"] = [{**row, "risk": row.get("security", {}).get("risk", "unknown")} for row in value.get("toolCalls", [])]
+        self._operations_rows["providers"] = list(value.get("providerTrust") or [])
+        self._operations_rows["generated"] = list(value.get("generatedCode") or [])
+        self._operations_rows["protected"] = list(value.get("protectedFiles") or [])
+        security: list[dict[str, Any]] = []
+        for incident in value.get("incidents") or []:
+            security.append({"severity": incident.get("severity", "info"), "title": incident.get("title", "Incident"),
+                             "evidence": incident.get("summary", ""), "confidence": incident.get("confidence", "unknown"), **incident})
+        for finding in value.get("generatedCode") or []:
+            security.append({"severity": finding.get("severity", "medium"), "title": finding.get("title", finding.get("ruleId", "Code finding")),
+                             "evidence": finding.get("evidence", ""), "confidence": finding.get("confidence", "review-suggestion"), **finding})
+        self._operations_rows["security"] = security
+        for row in value.get("externalContent", []):
+            self._operations_rows["security"].append({**row, "title": "External content assessment", "evidence": row.get("findings", []), "confidence": "review-suggestion"})
+        for row in value.get("protectionEvents", []):
+            self._operations_rows["security"].append({**row, "title": "Protected file " + str(row.get("action", "changed")), "evidence": row.get("path", ""), "confidence": "unknown"})
+        memory = value.get("memory") or {}
+        self._operations_rows["memory"] = [{**row, "path": row.get("src", row.get("path", ""))} for row in memory.get("findings", [])]
+        self._operations_rows["memory"].extend({**row, "type": "inventory", "severity": "", "preview": str(row.get("size", "")) + " bytes"} for row in memory.get("inventory", []))
+        for key in self._operations_trees:
+            self._populate_operation_table(key)
+        journals = list(value.get("journals") or [])
+        # Do not erase a just-rendered live journal when the asynchronous
+        # startup history query completes against a fresh database.
+        if not journals and getattr(self, "_journal_rows", None):
+            journals = list(self._journal_rows)
+        if hasattr(self, "_journal_tree"):
+            selected_id = self._journal_var.get()
+            self._journal_tree.delete(*self._journal_tree.get_children())
+            self._journal_rows = journals
+            for index, row in enumerate(journals):
+                verification = row.get("verificationRuns") or []
+                status = "not verified" if not verification else "passed" if all(item.get("exitCode") == 0 and not item.get("timedOut") for item in verification) else "failed"
+                self._journal_tree.insert("", "end", iid=str(index), values=(row.get("agent", ""), row.get("status", "unknown"), row.get("workspace", ""), row.get("prompt", "")[:160], status))
+                if row.get("id") == selected_id:
+                    self._journal_tree.selection_set(str(index))
+        agents = sorted({str(row.get("provider") or row.get("agent") or "unknown") for row in timeline if row.get("provider") or row.get("agent")})
+        if hasattr(self, "_agent_picker"):
+            choices = ["All agents"] + agents
+            self._agent_picker.configure(values=choices)
+            if self._agent_filter.get() not in choices:
+                self._agent_filter.set("All agents")
+
+    def _choose_workspace(self) -> None:
+        selected = filedialog.askdirectory(title=self._t("Workspace"), initialdir=self._workspace_var.get())
+        if selected:
+            self._workspace_var.set(selected)
+
+    def _select_journal(self) -> None:
+        selected = self._journal_tree.selection()
+        if not selected:
+            self._journal_var.set("")
+            return
+        try:
+            row = self._journal_rows[int(selected[0])]
+            self._journal_var.set(row["id"])
+            self._set_text_widget(self._verify_output, row)
+        except (IndexError, KeyError, ValueError):
+            self._journal_var.set("")
+
+    def _run_operation(self, action: str) -> None:
+        # A worker may have completed just before Tk drains its result event.
+        # Reconcile that state here so a second explicit action is not dropped.
+        if self._action_busy and self._action_threads and not any(thread.is_alive() for thread in self._action_threads):
+            self._action_busy = False
+        if self._closed or self._action_busy:
+            return
+        journal_id = self._journal_var.get().strip()
+        if action in {"finish", "verify", "recover", "recovery-preview"} and not journal_id:
+            self.status_var.set(self._t("No journal selected"))
+            return
+        arguments: dict[str, Any] = {}
+        if action == "begin":
+            prompt = simpledialog.askstring(self._t("Begin turn"), self._t("Task description (capture the baseline before starting the agent):"), parent=self)
+            if prompt is None:
+                return
+            arguments = {"workspace": self._workspace_var.get().strip(), "prompt": prompt}
+        elif action in {"finish", "verify", "recover", "recovery-preview"}:
+            arguments = {"journal_id": journal_id}
+        if action == "protect":
+            path = filedialog.askopenfilename(title=self._t("Protect file"), initialdir=self._workspace_var.get())
+            if not path:
+                return
+            auto = messagebox.askyesno(self._t("File protection"), self._t("Automatically restore this file after modification or deletion? Choose No for alerts only."))
+            arguments = {"path": path, "auto_restore": auto}
+        elif action == "unprotect" or action == "restore-file":
+            selected = self._selected_operation("protected")
+            if not selected:
+                self.status_var.set(self._t("Select a file first")); return
+            arguments = {"rule_id": selected.get("id", "")}
+            if action == "restore-file":
+                arguments["fingerprint"] = selected.get("lastFingerprint")
+                if not messagebox.askyesno(self._t("Restore file"), self._t("Restore the protected baseline for this file?") + "\n" + str(selected.get("path"))):
+                    return
+        elif action == "configure-analysis":
+            arguments = {"base_url": self._analysis_url.get(), "model": self._analysis_model.get(), "key_env": "AGENTREINS_ANALYSIS_API_KEY"}
+            if self._analysis_key.get():
+                os.environ["AGENTREINS_ANALYSIS_API_KEY"] = self._analysis_key.get()
+        elif action == "analyze":
+            evidence = getattr(self, "_last_evidence_selection", None)
+            if not evidence:
+                self.status_var.set(self._t("Select evidence first")); return
+            endpoint = self._analysis_url.get()
+            if not messagebox.askyesno(self._t("AI analysis"), self._t("Send the selected evidence after redaction to:") + "\n" + endpoint):
+                return
+            arguments = {"evidence": evidence}
+        elif action == "scan-memory-folder":
+            folder = filedialog.askdirectory(title=self._t("Scan selected folder"), initialdir=self._workspace_var.get())
+            if not folder:
+                return
+            arguments = {"targets": [folder]}
+            action = "scan-memory"
+        elif action == "redact-memory":
+            finding = self._selected_operation("memory")
+            if not finding: self.status_var.set(self._t("No data")); return
+            if not finding.get("match"):
+                self.status_var.set(self._t("Select a finding, not an inventory row")); return
+            if not messagebox.askyesno(self._t("Redact selected"), self._t("Back up the file and redact this finding?") + "\n" + str(finding.get("src", ""))):
+                return
+            arguments = {"finding": finding}
+        elif action == "restore-memory":
+            finding = self._selected_operation("memory")
+            if not finding: self.status_var.set(self._t("No data")); return
+            if not messagebox.askyesno(self._t("Restore memory"), self._t("Restore the last backed-up memory file?") + "\n" + str(finding.get("path", ""))):
+                return
+            arguments = {"path": finding.get("path", "")}
+        if action == "recover":
+            action = "recovery-confirm"
+        self._dispatch_operation(action, arguments)
+
+    def _dispatch_operation(self, action: str, arguments: dict[str, Any]) -> None:
+        database = Path(self.database_var.get()).expanduser().resolve()
+        # Mutating actions supersede any in-flight history/report request.
+        # Capture the generation in the event so the Tk thread can discard an
+        # old view when its worker eventually completes.
+        if action not in {"history", "report"}:
+            self._operations_epoch += 1
+        operation_epoch = self._operations_epoch
+        self._action_busy = action not in {"history", "report"}
+        self.status_var.set(self._t(action.replace("-", " ").title()) + "…")
+        def worker() -> None:
+            try:
+                runtime = self._ensure_operations_runtime(database)
+                result = runtime.run_action("recovery-preview" if action == "recovery-confirm" else action, **arguments)
+                self._events.put(("operations-action", (action, result, runtime.view(), arguments, operation_epoch)))
+            except Exception as exc:
+                # Keep the action and epoch with the error.  A stale startup
+                # history failure must not clear the busy state of a newer
+                # Verify/Recover operation.
+                self._events.put(("operations-error", (str(exc), action, operation_epoch)))
+        thread = threading.Thread(target=worker, daemon=True, name=f"agentreins-{action}")
+        self._action_threads.append(thread)
+        thread.start()
+
+    def _selected_operation(self, key: str) -> Optional[dict[str, Any]]:
+        tree = self._operations_trees.get(key)
+        if tree is None or not tree.selection():
+            return None
+        try:
+            return self._operations_rows[key][int(tree.selection()[0])]
+        except (ValueError, IndexError):
+            return None
+
+    def _observe_operations(self, record: dict[str, Any], database: Path) -> None:
+        try:
+            operations = self._ensure_operations_runtime(database).observe(record)
+            if self._auto_refresh_enabled:
+                # Tag the projection with the action generation. A snapshot
+                # that started before Verify/Recover must not replace a newer
+                # journal list when its worker result arrives later.
+                self._events.put(("operations", (operations, self._operations_epoch)))
+        except Exception as exc:
+            self._events.put(("operations-error", str(exc)))
+
     def capture_snapshot(self) -> None:
         if self._closed:
             return
@@ -436,6 +852,7 @@ class AgentReinsDesktop(tk.Tk):
             write_snapshot(record, destination)
             store.append_web_events([*web_events, *native_events])
             store.append_snapshot(record)
+            self._observe_operations(record, database)
             self._events.put(("snapshot", record))
         except Exception as exc:  # Keep UI alive when an OS collector is unavailable.
             self._events.put(("error", f"Snapshot failed: {exc}"))
@@ -479,16 +896,22 @@ class AgentReinsDesktop(tk.Tk):
         self.status_var.set(self._t("Watching..."))
         destination = Path(self.output_var.get()).expanduser()
         database = Path(self.database_var.get()).expanduser()
-        self._watch_thread = threading.Thread(target=self._watch_worker, args=(interval, destination, database), daemon=True, name="agentreins-watch")
+        workspace = Path(self._workspace_var.get()).expanduser()
+        if not workspace.is_dir():
+            self.status_var.set(self._t("Choose an existing workspace"))
+            self.watch_button.configure(text=self._t("Start watch"))
+            return
+        self._watch_thread = threading.Thread(target=self._watch_worker, args=(interval, destination, database, workspace), daemon=True, name="agentreins-watch")
         self._watch_thread.start()
 
-    def _watch_worker(self, interval: float, destination: Path, database: Path) -> None:
+    def _watch_worker(self, interval: float, destination: Path, database: Path, workspace: Path) -> None:
         store: Optional[EvidenceStore] = None
         file_watcher = None
         try:
             paths = platform_paths()
             store = EvidenceStore(database)
-            file_watcher = create_file_watcher([Path(paths["data"])], use_etw=self._use_etw)
+            watch_root = workspace if workspace.is_dir() else Path(paths["data"])
+            file_watcher = create_file_watcher([watch_root], use_etw=self._use_etw)
             web_reader = WebEvidenceReader(Path(paths["webEvidence"]))
             native_reader = NativeSessionReader()
             while not self._stop.is_set():
@@ -506,7 +929,8 @@ class AgentReinsDesktop(tk.Tk):
                     write_snapshot(record, destination)
                     store.append_web_events([*web_events, *native_events])
                     store.append_snapshot(record)
-                    store.append_file_events(file_events, store.latest_context())
+                    store.append_file_events(file_events)
+                    self._observe_operations(record, database)
                     if self._auto_refresh_enabled:
                         self._events.put(("snapshot", record))
                 except Exception as exc:
@@ -556,6 +980,56 @@ class AgentReinsDesktop(tk.Tk):
                 elif kind == "update-error":
                     self.update_button.configure(state="normal")
                     self.status_var.set(self._t("Could not check for updates: {error}", error=value))
+                elif kind == "operations":
+                    operations_value = value
+                    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], int):
+                        operations_value, operations_epoch = value
+                        if operations_epoch < self._operations_epoch:
+                            continue
+                    if self._live_follow.get():
+                        self._populate_operations(operations_value)
+                elif kind == "operations-action":
+                    action, result, view, arguments, operation_epoch = value
+                    # Ignore any stale operation result. A worker can race a
+                    # newer Verify/Recover action; applying its old snapshot
+                    # would make the live journal disappear or revert its
+                    # status in the Verify/Recover tab.
+                    if operation_epoch < self._operations_epoch:
+                        continue
+                    if action not in {"history", "report"} and operation_epoch == self._operations_epoch:
+                        self._action_busy = False
+                    if action == "begin" and isinstance(result, dict):
+                        self._journal_var.set(str(result.get("id", "")))
+                    self._populate_operations(view)
+                    if action in {"begin", "finish", "verify", "recover", "recovery-preview", "verification-preview", "recovery-confirm"}:
+                        self._set_text_widget(self._verify_output, result)
+                    if action == "analyze":
+                        self._set_text_widget(self._analysis_output, result)
+                    if action == "history":
+                        config = view.get("analysisConfiguration") or {}
+                        self._analysis_url.set(config.get("baseURL", self._analysis_url.get()))
+                        self._analysis_model.set(config.get("model", self._analysis_model.get()))
+                    if action == "recovery-confirm":
+                        if result.get("allowed") and messagebox.askyesno(self._t("Recover selected"), self._t("Apply this recovery preview?") + "\n\n" + json.dumps(result, ensure_ascii=False, indent=2)):
+                            self._dispatch_operation("recover", arguments)
+                            continue
+                    if action == "scan-memory" and result.get("errors"):
+                        self._set_text_widget(self._memory_output, {"errors": result["errors"], "inventoryCount": len(result.get("inventory", []))})
+                    self.status_var.set(self._t("Ready") + ": " + action)
+                elif kind == "operations-error":
+                    # Errors from observe/history are informational and must
+                    # not unlock an unrelated in-flight mutating action.
+                    # Dispatch errors carry the action and generation so we
+                    # can clear busy only for the current operation.
+                    if isinstance(value, tuple) and len(value) == 3:
+                        message, error_action, error_epoch = value
+                        if error_epoch < self._operations_epoch:
+                            continue
+                        if error_action not in {"history", "report"} and error_epoch == self._operations_epoch:
+                            self._action_busy = False
+                        self.status_var.set(str(message))
+                    else:
+                        self.status_var.set(str(value))
         except queue.Empty:
             pass
         if not self._closed:
@@ -571,6 +1045,9 @@ class AgentReinsDesktop(tk.Tk):
                 self._tray_icon.stop()
             except Exception:
                 pass
+        for thread in self._action_threads:
+            if thread.is_alive():
+                thread.join(timeout=1.5)
         self.destroy()
 
 

@@ -29,7 +29,7 @@ automatically. ETW is never started implicitly.
 ## Native Agent sessions
 
 The portable watcher also has best-effort, read-only adapters for local
-Codex, Claude Code, Qoder, WorkBuddy, Kiro, and Cursor evidence. JSON/JSONL
+Codex, Claude Code, Qoder, WorkBuddy, and Cursor evidence. JSON/JSONL
 adapters tail recent transcript records; Cursor's `state.vscdb` adapter opens
 the database read-only and projects the latest Composer bubbles. Captured
 native events use the existing schema version 2 with stable event IDs and
@@ -50,14 +50,19 @@ to AgentReins servers.
 ## Windows desktop executable
 
 The Tk desktop shell is packaged as a native, self-contained Windows EXE with
-PyInstaller. From PowerShell on Windows (Python 3.9+), run:
+PyInstaller. It exposes the same normalized operations surface as the
+portable backend: overview/runtime map, sessions, timeline, files, tools,
+security, providers, generated code, protected files, Verify/Recover, memory,
+AI analysis, processes, connections, and raw JSON. From PowerShell on Windows
+(Python 3.9+), run:
 
 ```powershell
 .\portable\build-windows.ps1
 ```
 
-The output is `dist\AgentReins.exe`; it opens a small desktop console with
-snapshot and watch controls and stores JSONL at the path shown in the window.
+The output is `dist\AgentReins.exe`; it opens the desktop console with
+snapshot/watch controls and stores JSONL plus the local SQLite history at the
+path shown in the window.
 The same build also emits `dist\AgentReinsNativeHost.exe`, the Chrome/Edge
 Native Messaging bridge used by the browser extension. The Windows installer
 copies and registers this host automatically.

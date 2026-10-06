@@ -26,6 +26,17 @@ jobs:
       - name: Smoke test
         shell: bash
         run: python portable/agentreins_portable.py paths
+      - name: Install Linux GUI smoke dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3-tk xvfb
+      - name: Linux desktop smoke test
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python portable/desktop_smoke.py
+      - name: Windows desktop smoke test
+        if: runner.os == 'Windows'
+        run: python portable/desktop_smoke.py
 
   windows-executable:
     name: Windows desktop executable

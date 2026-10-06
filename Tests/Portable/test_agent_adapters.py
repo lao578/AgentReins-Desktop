@@ -130,6 +130,33 @@ class NativeAgentAdapterTests(unittest.TestCase):
             self.assertEqual(events[0]["text"], "hello")
             self.assertEqual(reader.poll(), [])
 
+    def test_incremental_reader_preserves_codex_turn_and_tool_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / ".codex" / "sessions"
+            root.mkdir(parents=True)
+            transcript = root / "session.jsonl"
+            reader = MODULE.NativeSessionReader(roots={"codex": [root]}, cursor_databases=[])
+            first = [
+                {"type": "turn_context", "timestamp": "2026-10-05T12:00:00Z", "payload": {"id": "s", "turn_id": "turn-1", "cwd": "C:/repo", "model": "gpt-test"}},
+                {"type": "response_item", "timestamp": "2026-10-05T12:00:01Z", "payload": {"type": "function_call", "call_id": "call-1", "name": "shell", "arguments": "pytest"}},
+            ]
+            transcript.write_text("".join(json.dumps(row) + "\n" for row in first), encoding="utf-8")
+            events = reader.poll()
+            self.assertEqual(events[-1]["turnId"], "turn-1")
+            self.assertEqual(events[-1]["metadata"]["workspace"], "C:/repo")
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "response_item", "timestamp": "2026-10-05T12:00:02Z", "payload": {"type": "function_call_output", "call_id": "call-1", "output": "passed"}}) + "\n")
+            result = reader.poll()
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["toolCallId"], "call-1")
+            self.assertEqual(result[0]["toolName"], "shell")
+            self.assertEqual(result[0]["turnId"], "turn-1")
+
+    def test_default_roots_do_not_claim_unsupported_kiro_or_windsurf(self):
+        roots = MODULE.default_native_roots(Path("/home/test"))
+        self.assertNotIn("kiro", roots)
+        self.assertNotIn("windsurf", roots)
+
 
 if __name__ == "__main__":
     unittest.main()

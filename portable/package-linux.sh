@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Produce Linux distribution artifacts:
 #   * AppImage containing the PyInstaller desktop app
-#   * Debian amd64 package containing the app, CLI collector and user service
+#   * Debian package containing the app, CLI collector and user service
 #
 # Usage: package-linux.sh [all|appimage|deb]
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -14,8 +14,19 @@ if [[ -z "$VERSION" ]]; then
 fi
 VERSION="${VERSION#v}"
 VERSION="${VERSION//[^A-Za-z0-9.+~-]/-}"
+# ``git describe --always`` can return a bare commit id when no tag exists.
+# Keep ad-hoc/source builds usable by converting that value into a Debian and
+# PyInstaller-compatible development version instead of passing an invalid
+# package version to dpkg-deb.
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+  VERSION="0.0.0+${VERSION#-}"
+fi
 export AGENTREINS_VERSION="$VERSION"
-ARCH="${AGENTREINS_ARCH:-x86_64}"
+ARCH="${AGENTREINS_ARCH:-$(uname -m)}"
+case "$ARCH" in
+  amd64|x86_64) ARCH="x86_64" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
+esac
 OUT="$ROOT/dist"
 BUILD="$ROOT/build/linux-package"
 APPDIR="$BUILD/AppDir"
@@ -108,6 +119,15 @@ make_deb() {
   cp -a "$OUT/AgentReins" "$root/usr/lib/agentreins/AgentReins"
   cp "$ROOT/portable/agentreins_portable.py" "$root/usr/lib/agentreins/agentreins_portable.py"
   cp "$ROOT/portable/agent_adapters.py" "$root/usr/lib/agentreins/agent_adapters.py"
+  # Keep the source-side modules next to the portable CLI as well as in the
+  # frozen desktop binary.  The CLI/runtime imports provider_config and
+  # process_rules lazily, so omitting them would make a Debian install fail
+  # only when those views are first requested.
+  for module in operations_runtime.py operations_cli.py turn_journal.py evidence_projection.py safety_features.py update_checker.py provider_config.py process_rules.py; do
+    if [[ -f "$ROOT/portable/$module" ]]; then
+      cp "$ROOT/portable/$module" "$root/usr/lib/agentreins/$module"
+    fi
+  done
   if [[ -f "$ROOT/Assets/agentreins-logo.png" ]]; then
     cp "$ROOT/Assets/agentreins-logo.png" "$root/usr/share/icons/hicolor/512x512/apps/agentreins.png"
   fi
@@ -156,12 +176,23 @@ Enable the per-user collector after installation:
 Stop/disable it with:
   systemctl --user disable --now agentreins.service
 EOF
+  local deb_arch="${AGENTREINS_DEB_ARCH:-}"
+  if [[ -z "$deb_arch" ]]; then
+    deb_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  fi
+  if [[ -z "$deb_arch" ]]; then
+    case "$ARCH" in
+      x86_64|amd64) deb_arch="amd64" ;;
+      aarch64|arm64) deb_arch="arm64" ;;
+      *) echo "Unable to determine Debian architecture for $ARCH" >&2; return 2 ;;
+    esac
+  fi
   cat > "$root/DEBIAN/control" <<EOF
 Package: agentreins
 Version: $VERSION
 Section: utils
 Priority: optional
-Architecture: amd64
+Architecture: $deb_arch
 Maintainer: AgentReins contributors
 Description: Local-first AI agent evidence console
  AgentReins observes local process and network metadata and writes JSONL evidence.
@@ -176,7 +207,7 @@ fi
 exit 0
 EOF
   chmod 0755 "$root/DEBIAN/postinst"
-  local output="$OUT/AgentReins-${VERSION}-Linux-amd64.deb"
+  local output="$OUT/AgentReins-${VERSION}-Linux-${deb_arch}.deb"
   dpkg-deb --build --root-owner-group "$root" "$output" >/dev/null
   sha256sum "$output" > "$output.sha256"
   echo "Created $output"

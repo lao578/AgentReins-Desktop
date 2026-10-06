@@ -48,6 +48,15 @@ fi
   --workpath "$ROOT/build/pyinstaller-linux" \
   --specpath "$ROOT/build/pyinstaller-linux" \
   --paths "$BUILD_VERSION_DIR" \
+  --hidden-import agent_adapters \
+  --hidden-import update_checker \
+  --hidden-import operations_runtime \
+  --hidden-import operations_cli \
+  --hidden-import turn_journal \
+  --hidden-import evidence_projection \
+  --hidden-import safety_features \
+  --hidden-import provider_config \
+  --hidden-import process_rules \
   "${tray_args[@]}" \
   "$ROOT/portable/agentreins_desktop.py"
 

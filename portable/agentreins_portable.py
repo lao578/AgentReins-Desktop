@@ -27,6 +27,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -659,9 +660,50 @@ def _run(command: list[str], timeout: float = 8.0) -> str:
     try:
         completed = subprocess.run(command, check=False, capture_output=True, text=True,
                                    errors="replace", timeout=timeout)
+        if completed.returncode and hasattr(_probe_health, "errors"):
+            _probe_health.errors.append({"collector": Path(command[0]).name, "error": "exit " + str(completed.returncode)})
         return completed.stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        if hasattr(_probe_health, "errors"):
+            _probe_health.errors.append({"collector": Path(command[0]).name, "error": type(error).__name__})
         return ""
+
+
+_probe_health = threading.local()
+
+
+def redact_command(command: str) -> str:
+    """Retain executable intent without persisting common command-line secrets."""
+    command = re.sub(r"(?i)(--?(?:api[-_]?key|token|password|secret|authorization)(?:=|\s+))(\"[^\"]*\"|'[^']*'|\S+)", r"\1[REDACTED]", command)
+    command = re.sub(r"(?i)(\b(?:bearer|basic)\s+)\S+", r"\1[REDACTED]", command)
+    command = re.sub(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@", command)
+    command = re.sub(r"(?i)(\b\w*(?:TOKEN|PASSWORD|SECRET|API_KEY)\w*=)(\"[^\"]*\"|'[^']*'|\S+)", r"\1[REDACTED]", command)
+    return command[:32768]
+
+
+def agent_process_tree(rows: Iterable[ProcessRecord], collector_pid: Optional[int] = None) -> list[ProcessRecord]:
+    """Observe known Agent roots and descendants, excluding this collector's tree."""
+    rows = list(rows)
+    excluded = {collector_pid if collector_pid is not None else os.getpid()}
+    children: dict[int, list[int]] = {}
+    for row in rows:
+        children.setdefault(row.ppid, []).append(row.pid)
+    pending = list(excluded)
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child not in excluded:
+                excluded.add(child)
+                pending.append(child)
+    owners = {row.pid: row.agent for row in rows if row.agent and row.pid not in excluded}
+    pending = list(owners)
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, []):
+            if child not in owners and child not in excluded:
+                owners[child] = owners[parent]
+                pending.append(child)
+    return [ProcessRecord(row.pid, row.ppid, redact_command(row.command), row.executable, owners[row.pid])
+            for row in rows if row.pid in owners]
 
 
 def _agent_for(command: str) -> Optional[str]:
@@ -853,7 +895,10 @@ def agent_summary(items: Iterable[ProcessRecord]) -> list[dict[str, object]]:
 
 
 def snapshot() -> dict[str, object]:
-    procs = processes()
+    _probe_health.errors = []
+    procs = agent_process_tree(processes())
+    pids = {row.pid for row in procs}
+    connections = [asdict(row) for row in network() if row.pid in pids]
     system = platform.system().lower()
     capabilities = ["processExecution", "processLineage", "networkConnection", "sqliteEvidence", "agentSessionCorrelation", "toolCallCorrelation", "nativeSessionAdapters"]
     if system == "linux":
@@ -874,7 +919,9 @@ def snapshot() -> dict[str, object]:
         "collector": "agentreins-portable",
         "capabilities": capabilities,
         "processes": [asdict(item) for item in procs],
-        "connections": [asdict(item) for item in network()],
+        "connections": connections,
+        "collectorHealth": {"status": "degraded" if _probe_health.errors else "observed", "errors": _probe_health.errors,
+                            "scope": "agent-process-trees", "shortLivedConnections": "may-be-missed"},
         "fileEvents": [],
         "agents": agent_summary(procs),
     }

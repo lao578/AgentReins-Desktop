@@ -56,7 +56,12 @@ Set-Content -LiteralPath (Join-Path $buildVersionDir 'agentreins_build_version.p
 if ($OneDir) {
     # One-dir builds are useful for debugging startup failures and are
     # selected with a direct CLI rebuild instead of the one-file spec.
-    $args = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', 'AgentReins', '--paths', $buildVersionDir, (Join-Path $PSScriptRoot 'agentreins_desktop.py'))
+    $args = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', 'AgentReins', '--paths', $buildVersionDir,
+        '--hidden-import', 'agent_adapters', '--hidden-import', 'update_checker',
+        '--hidden-import', 'operations_runtime', '--hidden-import', 'operations_cli', '--hidden-import', 'turn_journal',
+        '--hidden-import', 'evidence_projection', '--hidden-import', 'safety_features',
+        '--hidden-import', 'provider_config', '--hidden-import', 'process_rules',
+        (Join-Path $PSScriptRoot 'agentreins_desktop.py'))
 }
 Push-Location $root
 try {

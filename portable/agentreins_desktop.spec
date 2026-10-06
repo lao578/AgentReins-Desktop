@@ -21,7 +21,14 @@ a = Analysis(
     datas=[],
     # The desktop shell loads tray support lazily so source runs remain
     # dependency-free. Include it in release binaries when installed.
-    hiddenimports=tray_imports + ["update_checker", "agent_adapters"],
+    hiddenimports=tray_imports + [
+        "update_checker", "agent_adapters", "operations_runtime", "turn_journal",
+        "evidence_projection", "safety_features", "operations_cli",
+        # These modules are imported lazily from the projection/runtime path.
+        # PyInstaller's AST walk does not reliably retain imports nested in
+        # fallback ``try`` blocks, so keep them explicit for frozen builds.
+        "provider_config", "process_rules",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

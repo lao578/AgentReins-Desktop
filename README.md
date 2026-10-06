@@ -165,7 +165,11 @@ the Tk desktop console plus the dependency-free collector under
 [`portable/`](portable/README.md). It keeps the same normalized evidence
 boundary—Agent process lineage, TCP destinations, file changes, and browser
 session/tool links—and writes versioned JSONL plus a local SQLite evidence
-database.
+database. The portable console also exposes the cross-platform Trace / Verify /
+Recover workflow, security and memory audits, provider/session projections,
+protected-file recovery, and optional semantic analysis. See
+[`docs/PLATFORM-PARITY.md`](docs/PLATFORM-PARITY.md) for the exact behavior
+contract and remaining platform-specific differences.
 
 ```bash
 # Linux
